@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { DAYS, TH, LB, TM, COL, ALL, parseSlots, owner, ruleCols, ruleHits, clashes } from "./slots";
 import courseCatalog from "./courseCatalog.json";
-import { onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut } from "firebase/auth";
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import { onAuthStateChanged, GoogleAuthProvider, signInAnonymously, signInWithPopup, signOut as firebaseSignOut } from "firebase/auth";
+import { arrayUnion, collection, deleteDoc, doc, getDoc, onSnapshot, runTransaction, serverTimestamp, setDoc, updateDoc, writeBatch } from "firebase/firestore";
 import { auth, db, FIREBASE_CONFIGURED } from "./firebase";
 
 const KEY = "ffcs-v1";
+const COLLAB_KEY = "ffcs-collab-room-v1";
 const uid = () => Math.random().toString(36).slice(2, 9);
 const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } };
 
@@ -28,10 +30,23 @@ function App() {
   const [cur, setCur] = useState(null);
   const [dataReady, setDataReady] = useState(!FIREBASE_CONFIGURED);
   const [cloudLoadError, setCloudLoadError] = useState("");
+  const [accountDataReview, setAccountDataReview] = useState(null);
+  const [accountReviewError, setAccountReviewError] = useState("");
+  const [accountReviewBusy, setAccountReviewBusy] = useState(false);
   const [cloudStatus, setCloudStatus] = useState("");
   const [authError, setAuthError] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  // Never attach a room from browser storage before validating that it belongs to
+  // the currently authenticated Firebase UID. Old builds stored one global room
+  // key, which could accidentally reopen another account's shared timetable.
+  const [activeCollab, setActiveCollab] = useState(null);
+  const [roomRestoreChecked, setRoomRestoreChecked] = useState(false);
+  const [collabOpen, setCollabOpen] = useState(() => Boolean(new URLSearchParams(window.location.search).get("room")));
+  const [pendingRoomId, setPendingRoomId] = useState(() => new URLSearchParams(window.location.search).get("room") || "");
+  const [collabBusy, setCollabBusy] = useState(false);
+  const [collabError, setCollabError] = useState("");
+  const [authRevision, setAuthRevision] = useState(0);
 
   // Firebase restores a signed-in Google account automatically on page reload.
   useEffect(() => {
@@ -40,10 +55,16 @@ function App() {
       return undefined;
     }
     const unsubscribe = onAuthStateChanged(auth, (authUser) => {
-      setSession(authUser || null);
+      // Anonymous auth is used only to authorize collaboration rooms. It must not
+      // switch the user's personal planner from local storage to a blank cloud profile.
+      const accountUser = authUser && !authUser.isAnonymous ? authUser : null;
+      setSession(accountUser);
       setAuthInitialized(true);
+      setAuthRevision((revision) => revision + 1);
       setAuthError("");
-      if (authUser) {
+      if (accountUser) {
+        setAccountDataReview(null);
+        setAccountReviewError("");
         setDataReady(false);
         setCloudLoadError("");
         setCloudStatus("Loading account…");
@@ -59,8 +80,9 @@ function App() {
     return unsubscribe;
   }, []);
 
-  // Load this Google account's private document from Firestore. Existing browser
-  // progress is imported on the first sign-in when no cloud document exists.
+  // Load only this Google account's private document from Firestore. The legacy
+  // browser cache is not a shared fallback: it may be imported only when its saved
+  // email explicitly matches this account.
   useEffect(() => {
     if (!FIREBASE_CONFIGURED || !authInitialized || !session?.uid) return undefined;
     let alive = true;
@@ -72,27 +94,53 @@ function App() {
       try {
         const record = await getDoc(doc(db, "users", session.uid));
         const saved = record.exists() ? record.data() : null;
+        if (record.exists() && (!saved?.ownerUid || saved.ownerUid !== session.uid)) {
+          // Older versions didn't mark private docs with their owning UID. Some
+          // may already contain data accidentally copied from the global browser
+          // cache, so require an explicit keep/reset choice before showing it.
+          try { localStorage.removeItem(KEY); } catch {}
+          if (alive) {
+            setAccountDataReview({
+              uid: session.uid,
+              email: session.email || "",
+              saved: saved?.ownerUid ? null : saved,
+              ownershipMismatch: Boolean(saved?.ownerUid && saved.ownerUid !== session.uid),
+            });
+            setAccountReviewError("");
+            setCloudLoadError("");
+            setCloudStatus("Review saved account data");
+            setDataReady(true);
+          }
+          return;
+        }
         const browserData = load();
         const hasBrowserProgress = Boolean(browserData.user || (Array.isArray(browserData.tts) && browserData.tts.length));
+        // KEY is a legacy, browser-wide cache. Never import it into a different
+        // Google account merely because that account has no Firestore document.
+        // A legacy cache can only be migrated when its saved email explicitly
+        // matches the account being loaded.
+        const cachedEmail = String(browserData.user?.email || "").trim().toLowerCase();
+        const accountEmail = String(session.email || "").trim().toLowerCase();
+        const mayImportLegacyCache = !record.exists() && Boolean(cachedEmail && accountEmail && cachedEmail === accountEmail);
         const selectedUser = saved?.user
           ? { ...profileFromAuth(session), ...saved.user, email: saved.user.email || session.email || "" }
-          : (!record.exists() && browserData.user
+          : (mayImportLegacyCache && browserData.user
             ? { ...browserData.user, email: session.email || "" }
             : profileFromAuth(session));
         const selectedTimetables = Array.isArray(saved?.tts)
           ? saved.tts
-          : (!record.exists() && Array.isArray(browserData.tts) ? browserData.tts : []);
+          : (mayImportLegacyCache && Array.isArray(browserData.tts) ? browserData.tts : []);
         const selectedCustomCatalog = Array.isArray(saved?.customCatalog)
           ? saved.customCatalog
-          : (!record.exists() && Array.isArray(browserData.customCatalog) ? browserData.customCatalog : []);
+          : (mayImportLegacyCache && Array.isArray(browserData.customCatalog) ? browserData.customCatalog : []);
         const selectedHiddenCatalogCodes = Array.isArray(saved?.hiddenCatalogCodes)
           ? saved.hiddenCatalogCodes
-          : (!record.exists() && Array.isArray(browserData.hiddenCatalogCodes) ? browserData.hiddenCatalogCodes : []);
+          : (mayImportLegacyCache && Array.isArray(browserData.hiddenCatalogCodes) ? browserData.hiddenCatalogCodes : []);
 
-        // Don't leave a previous account's local cache on a shared browser once
-        // a cloud record is present. A new account's local progress is kept until
-        // the first Firestore save succeeds.
-        if (record.exists() || !hasBrowserProgress) {
+        // Clear the legacy browser-wide cache once it has been safely imported
+        // for the same email, or quarantined from this signed-in account. This
+        // prevents another account from seeing it on its next login.
+        if (record.exists() || !hasBrowserProgress || !mayImportLegacyCache) {
           try { localStorage.removeItem(KEY); } catch {}
         }
         if (alive) {
@@ -123,12 +171,13 @@ function App() {
 
   // Debounced cloud autosave; the initial read must finish before writes begin.
   useEffect(() => {
-    if (!FIREBASE_CONFIGURED || !session?.uid || !dataReady || !user) return undefined;
+    if (!FIREBASE_CONFIGURED || !session?.uid || !dataReady || !user || accountDataReview) return undefined;
     let alive = true;
     setCloudStatus("Saving changes…");
     const timer = window.setTimeout(async () => {
       try {
         await setDoc(doc(db, "users", session.uid), {
+          ownerUid: session.uid,
           user,
           tts,
           customCatalog,
@@ -142,7 +191,297 @@ function App() {
       }
     }, 650);
     return () => { alive = false; window.clearTimeout(timer); };
-  }, [session?.uid, dataReady, user, tts, customCatalog, hiddenCatalogCodes]);
+  }, [session?.uid, dataReady, user, tts, customCatalog, hiddenCatalogCodes, accountDataReview]);
+
+  // Resume a saved room only when the exact Firebase UID that joined it is still
+  // active. Never restore a room merely because another account uses this browser.
+  useEffect(() => {
+    if (roomRestoreChecked) return undefined;
+    if (!authInitialized) return undefined;
+    const inviteRoom = new URLSearchParams(window.location.search).get("room");
+    if (inviteRoom) {
+      // A URL invite opens the join dialog; joining must still be an explicit action.
+      setRoomRestoreChecked(true);
+      return undefined;
+    }
+    let savedRoom = null;
+    try { savedRoom = JSON.parse(localStorage.getItem(COLLAB_KEY) || "null"); } catch {}
+    const currentUid = auth?.currentUser?.uid || "";
+    if (FIREBASE_CONFIGURED && savedRoom?.id && savedRoom?.memberUid && currentUid && savedRoom.memberUid === currentUid) {
+      setActiveCollab({ ...savedRoom, data: null });
+    } else if (savedRoom?.id) {
+      // Older builds didn't record the joining UID, so fail closed and require
+      // the user to join explicitly again with the room link and code.
+      try { localStorage.removeItem(COLLAB_KEY); } catch {}
+    }
+    setRoomRestoreChecked(true);
+    return undefined;
+  }, [authInitialized, authRevision, roomRestoreChecked]);
+
+  // If the Firebase account changes while a room is open, detach the old room.
+  useEffect(() => {
+    if (!authInitialized || !activeCollab?.id) return;
+    const currentUid = auth?.currentUser?.uid || "";
+    if (!activeCollab.memberUid || !currentUid || activeCollab.memberUid !== currentUid) {
+      setActiveCollab(null);
+      setCollabOpen(false);
+      setCollabError("");
+      try { localStorage.removeItem(COLLAB_KEY); } catch {}
+    }
+  }, [authInitialized, authRevision, activeCollab?.id, activeCollab?.memberUid]);
+
+  // A room snapshot is the source of truth for all collaborators. Every change is
+  // broadcast through Firestore's realtime listener.
+  useEffect(() => {
+    if (!FIREBASE_CONFIGURED || !db || !authInitialized || !activeCollab?.id) return undefined;
+    if (!auth?.currentUser) {
+      setCollabError("Your collaboration session is no longer signed in. Return to the planner, then rejoin using the room link and code.");
+      return undefined;
+    }
+    const roomId = activeCollab.id;
+    const unsubscribe = onSnapshot(doc(db, "collabRooms", roomId), (snapshot) => {
+      if (!snapshot.exists()) {
+        setCollabError("This collaboration room no longer exists or has been closed.");
+        return;
+      }
+      const data = snapshot.data();
+      setCollabError("");
+      setActiveCollab((current) => current?.id === roomId ? { ...current, data, ownerUid: data.ownerUid } : current);
+    }, (error) => {
+      setCollabError(error.message || "Could not sync this room. Check the Firestore collaboration rules.");
+    });
+    return unsubscribe;
+  }, [activeCollab?.id, authInitialized, authRevision]);
+
+  // Remember the active room locally so refreshing the page restores the code,
+  // link, and live subscription instead of stranding the room owner.
+  useEffect(() => {
+    if (!roomRestoreChecked) return;
+    try {
+      if (!activeCollab?.id) {
+        localStorage.removeItem(COLLAB_KEY);
+      } else {
+        localStorage.setItem(COLLAB_KEY, JSON.stringify({
+          id: activeCollab.id,
+          code: activeCollab.code,
+          link: activeCollab.link,
+          ownerUid: activeCollab.ownerUid,
+          memberUid: activeCollab.memberUid || auth?.currentUser?.uid || "",
+          sourceTimetableId: activeCollab.data?.sourceTimetableId || activeCollab.sourceTimetableId || "",
+        }));
+      }
+    } catch { /* Room state is still available for this page session. */ }
+  }, [roomRestoreChecked, activeCollab?.id, activeCollab?.code, activeCollab?.link, activeCollab?.ownerUid, activeCollab?.memberUid, activeCollab?.data?.sourceTimetableId, activeCollab?.sourceTimetableId]);
+
+  const requireCollaborationAuth = async () => {
+    if (!FIREBASE_CONFIGURED || !auth || !db) {
+      throw new Error("Collaboration requires Firebase. Configure your VITE_FIREBASE_* values, publish firestore.rules, and enable Anonymous sign-in in Firebase Authentication.");
+    }
+    if (auth.currentUser) return auth.currentUser;
+    try {
+      const credential = await signInAnonymously(auth);
+      return credential.user;
+    } catch (error) {
+      if (error.code === "auth/operation-not-allowed") {
+        throw new Error("Enable Anonymous sign-in in Firebase Console → Authentication → Sign-in method to let people join without a Google account.");
+      }
+      throw new Error(error.message || "Could not authorize collaboration. Check Firebase Authentication settings.");
+    }
+  };
+
+  const clearRoomFromAddress = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("room");
+    window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+    setPendingRoomId("");
+  };
+
+  const createCollaborationRoom = async (timetable) => {
+    setCollabError("");
+    setCollabBusy(true);
+    try {
+      const collabUser = await requireCollaborationAuth();
+      const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      const randomBytes = new Uint8Array(8);
+      window.crypto.getRandomValues(randomBytes);
+      const code = Array.from(randomBytes, (byte) => alphabet[byte % alphabet.length]).join("");
+      const roomRef = doc(collection(db, "collabRooms"));
+      const inviteRef = doc(db, "collabInvites", code);
+      const cleanTimetable = JSON.parse(JSON.stringify(timetable));
+      const ownerName = user?.n || collabUser.displayName || "Student";
+      const payload = {
+        ownerUid: collabUser.uid,
+        ownerName,
+        participantIds: [collabUser.uid],
+        participants: [collabUser.uid],
+        sourceTimetableId: timetable.id,
+        timetable: cleanTimetable,
+      };
+      const batch = writeBatch(db);
+      batch.set(roomRef, { ...payload, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      batch.set(inviteRef, { roomId: roomRef.id, ownerUid: collabUser.uid, createdAt: serverTimestamp() });
+      await batch.commit();
+      const link = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomRef.id)}`;
+      clearRoomFromAddress();
+      setActiveCollab({ id: roomRef.id, code, link, ownerUid: collabUser.uid, memberUid: collabUser.uid, data: payload });
+      setCollabOpen(false);
+    } catch (error) {
+      setCollabError(error.message || "Could not create a collaboration room.");
+    } finally {
+      setCollabBusy(false);
+    }
+  };
+
+  const joinCollaborationRoom = async (rawCode) => {
+    const code = String(rawCode || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!code) {
+      setCollabError("Enter the 8-character room code shared by the timetable owner.");
+      return;
+    }
+    setCollabError("");
+    setCollabBusy(true);
+    let joinStage = "authentication";
+    try {
+      const collabUser = await requireCollaborationAuth();
+      joinStage = "invite lookup";
+      const inviteSnapshot = await getDoc(doc(db, "collabInvites", code));
+      if (!inviteSnapshot.exists()) throw new Error("That room code wasn't found. Check the 8-character code and try again.");
+      const invite = inviteSnapshot.data();
+      if (typeof invite.roomId !== "string" || typeof invite.ownerUid !== "string") {
+        throw new Error("This invite is incomplete. Ask the room creator to create a new collaboration link and code.");
+      }
+      if (pendingRoomId && invite.roomId !== pendingRoomId) {
+        throw new Error("That code belongs to a different room. Use the code provided with this link.");
+      }
+      const roomId = invite.roomId;
+      joinStage = "room membership update";
+      await updateDoc(doc(db, "collabRooms", roomId), {
+        participantIds: arrayUnion(collabUser.uid),
+        participants: arrayUnion(collabUser.uid),
+        joinCode: code,
+        updatedAt: serverTimestamp(),
+      });
+      const link = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomId)}`;
+      clearRoomFromAddress();
+      setActiveCollab({ id: roomId, code, link, ownerUid: invite.ownerUid, memberUid: collabUser.uid, data: null });
+      setCollabOpen(false);
+    } catch (error) {
+      if (error.code === "permission-denied") {
+        const detail = joinStage === "invite lookup"
+          ? "Firestore denied reading the invite code (collabInvites). Publish the included firestore.rules in the Firebase project configured by VITE_FIREBASE_PROJECT_ID."
+          : joinStage === "room membership update"
+            ? "Firestore denied adding you to the room (collabRooms). Publish the included firestore.rules in the same Firebase project, and confirm Anonymous sign-in is enabled."
+            : "Firebase denied collaboration access. Check Authentication settings and the project's Firestore rules.";
+        setCollabError(`${detail} If you already published the rules, verify that VITE_FIREBASE_PROJECT_ID matches the Firebase project where you published them.`);
+      } else {
+        setCollabError(error.message || "Could not join this collaboration room.");
+      }
+    } finally {
+      setCollabBusy(false);
+    }
+  };
+
+  const updateCollaborationTimetable = (fn) => {
+    const room = activeCollab;
+    const collabUser = auth?.currentUser;
+    if (!room?.id || !room.data?.timetable || !collabUser) return;
+    setCollabError("");
+    // Optimistic local update makes editing feel immediate; the transaction below
+    // reapplies the same change to the latest server version to avoid lost updates.
+    setActiveCollab((current) => current?.id === room.id && current.data?.timetable
+      ? { ...current, data: { ...current.data, timetable: fn(current.data.timetable) } }
+      : current);
+    runTransaction(db, async (transaction) => {
+      const roomRef = doc(db, "collabRooms", room.id);
+      const snapshot = await transaction.get(roomRef);
+      if (!snapshot.exists()) throw new Error("This collaboration room no longer exists.");
+      const latest = snapshot.data();
+      if (!latest.participantIds?.includes(collabUser.uid)) throw new Error("You are no longer a member of this collaboration room.");
+      const nextTimetable = fn(latest.timetable);
+      transaction.update(roomRef, { timetable: nextTimetable, updatedAt: serverTimestamp() });
+      return { nextTimetable, ownerUid: latest.ownerUid, sourceTimetableId: latest.sourceTimetableId };
+    }).then((result) => {
+      setActiveCollab((current) => current?.id === room.id && current.data
+        ? { ...current, data: { ...current.data, timetable: result.nextTimetable } }
+        : current);
+      // Keep the room creator's original private timetable in step with the room.
+      if (result.ownerUid === collabUser.uid && result.sourceTimetableId) {
+        setTts((items) => items.map((item) => item.id === result.sourceTimetableId ? result.nextTimetable : item));
+      }
+    }).catch((error) => {
+      setCollabError(error.message || "A change could not be synchronized. Please retry.");
+    });
+  };
+
+  const reconnectCollaborationRoom = async () => {
+    if (!activeCollab?.id || !activeCollab?.code) {
+      setCollabError("The saved room code is missing. Open the original invite link and enter the code again.");
+      return;
+    }
+    setCollabBusy(true);
+    setCollabError("");
+    try {
+      const collabUser = await requireCollaborationAuth();
+      await updateDoc(doc(db, "collabRooms", activeCollab.id), {
+        participantIds: arrayUnion(collabUser.uid),
+        participants: arrayUnion(collabUser.uid),
+        joinCode: activeCollab.code,
+        updatedAt: serverTimestamp(),
+      });
+      setCollabError("");
+      setActiveCollab((current) => current?.id === activeCollab.id ? { ...current, memberUid: collabUser.uid } : current);
+      // Force a fresh document listener after a reconnect may have initially
+      // been denied before the current UID was added as a room member.
+      setAuthRevision((revision) => revision + 1);
+    } catch (error) {
+      setCollabError(error.message || "Could not reconnect to this room. Check the saved room code.");
+    } finally {
+      setCollabBusy(false);
+    }
+  };
+
+  const leaveCollaborationRoom = () => {
+    setActiveCollab(null);
+    setCollabError("");
+    setCollabOpen(false);
+    clearRoomFromAddress();
+  };
+
+  const keepLegacyAccountData = () => {
+    if (!session?.uid || accountDataReview?.uid !== session.uid || accountDataReview.ownershipMismatch || !accountDataReview.saved) return;
+    const saved = accountDataReview.saved;
+    setUser(saved.user
+      ? { ...profileFromAuth(session), ...saved.user, email: saved.user.email || session.email || "" }
+      : profileFromAuth(session));
+    setTts(Array.isArray(saved.tts) ? saved.tts : []);
+    setCustomCatalog(Array.isArray(saved.customCatalog) ? saved.customCatalog : []);
+    setHiddenCatalogCodes(Array.isArray(saved.hiddenCatalogCodes) ? saved.hiddenCatalogCodes : []);
+    setAccountDataReview(null);
+    setAccountReviewError("");
+    setDataReady(true);
+    setCloudStatus("Verifying account ownership…");
+  };
+
+  const startFreshAccountData = async () => {
+    if (!session?.uid || accountDataReview?.uid !== session.uid) return;
+    setAccountReviewBusy(true);
+    setAccountReviewError("");
+    try {
+      await deleteDoc(doc(db, "users", session.uid));
+      setUser(profileFromAuth(session));
+      setTts([]);
+      setCustomCatalog([]);
+      setHiddenCatalogCodes([]);
+      setCur(null);
+      setAccountDataReview(null);
+      setDataReady(true);
+      setCloudStatus("Starting a private planner…");
+    } catch (error) {
+      setAccountReviewError(error.message || "Could not reset this account's saved planner. Check the Firestore security rules.");
+    } finally {
+      setAccountReviewBusy(false);
+    }
+  };
 
   const handleGoogleLogin = async () => {
     setAuthError("");
@@ -170,6 +509,10 @@ function App() {
   };
 
   const logout = async () => {
+    setActiveCollab(null);
+    setCollabOpen(false);
+    setAccountDataReview(null);
+    setAccountReviewError("");
     if (session) {
       // Clear the signed-in profile before auth state changes, avoiding writing
       // cloud-account data back into guest storage during sign-out.
@@ -187,7 +530,37 @@ function App() {
     }
     setUser(null);
     setCur(null);
+    if (auth?.currentUser?.isAnonymous) {
+      try { await firebaseSignOut(auth); } catch { /* Local logout should still complete. */ }
+    }
   };
+
+  if (session && accountDataReview?.uid === session.uid) {
+    return (
+      <div className="center">
+        <section className="card account-review-card" aria-labelledby="account-review-title">
+          <div className="eyebrow">PRIVATE ACCOUNT CHECK</div>
+          <h2 id="account-review-title">Verify your saved timetable</h2>
+          <p className="mut">
+            This account has data saved by an older version of FFCS Planner. That version could copy browser data into a newly signed-in account, so we have not opened the saved timetable yet.
+          </p>
+          <div className="account-review-email"><span>Signed in as</span><b>{accountDataReview.email || session.email || "Google account"}</b></div>
+          {accountDataReview.ownershipMismatch ? (
+            <div className="err account-review-error">This Firestore document is explicitly marked as belonging to a different Firebase user. Its contents are hidden for safety. Reset this account to create a clean private planner.</div>
+          ) : (
+            <p className="account-review-help">Choose <b>Keep my saved timetable</b> only if the saved data belongs to this Google account. If it shows a timetable copied from another account, choose <b>Start this account fresh</b>.</p>
+          )}
+          {accountReviewError && <div className="err account-review-error">{accountReviewError}</div>}
+          <div className="account-review-actions">
+            {!accountDataReview.ownershipMismatch && <button className="btn secondary-btn" onClick={keepLegacyAccountData} disabled={accountReviewBusy}>Keep my saved timetable</button>}
+            <button className="btn p" onClick={startFreshAccountData} disabled={accountReviewBusy}>{accountReviewBusy ? "Resetting account…" : "Start this account fresh"}</button>
+            <button className="btn ghost-btn" onClick={logout} disabled={accountReviewBusy}>Sign out</button>
+          </div>
+          <p className="fine-print">This choice affects only the signed-in account shown above. Other Google accounts have separate Firestore documents.</p>
+        </section>
+      </div>
+    );
+  }
 
   if (FIREBASE_CONFIGURED && !authInitialized) {
     return <div className="center"><div className="card loading-card"><div className="brand-mark">F</div><h2>Opening your planner</h2><p className="mut">Checking your Google account…</p></div></div>;
@@ -197,14 +570,37 @@ function App() {
   }
 
   if (!user) return <Login onLogin={setUser} onGoogleLogin={handleGoogleLogin} authError={authError} authBusy={authBusy} cloudConfigured={FIREBASE_CONFIGURED} />;
-  const tt = tts.find((t) => t.id === cur);
+  const localTt = tts.find((t) => t.id === cur);
+  const tt = activeCollab?.data?.timetable || (!activeCollab ? localTt : null);
+  const collaborationProps = {
+    activeCollab,
+    collabOpen,
+    pendingRoomId,
+    collabBusy,
+    collabError,
+    openCollab: () => { setCollabError(""); setCollabOpen(true); },
+    closeCollab: () => { setCollabOpen(false); setCollabError(""); },
+    createCollab: createCollaborationRoom,
+    joinCollab: joinCollaborationRoom,
+    leaveCollab: leaveCollaborationRoom,
+    clearCollabError: () => setCollabError(""),
+    firebaseConfigured: FIREBASE_CONFIGURED,
+  };
+  if (activeCollab && !activeCollab.data?.timetable) {
+    return <div className="center"><div className="card loading-card"><div className="brand-mark">F</div><h2>Joining collaboration room</h2><p className="mut">Connecting to the live timetable…</p>{collabError && <><div className="err cloud-error">{collabError}</div>{activeCollab.code && <p className="mut">Saved room code: <b>{activeCollab.code}</b></p>}<button className="btn p" onClick={reconnectCollaborationRoom} disabled={collabBusy}>{collabBusy ? "Reconnecting…" : "Reconnect room"}</button><button className="btn s ghost-btn" onClick={leaveCollaborationRoom}>Return to planner</button></>}</div></div>;
+  }
   if (!tt) {
     return <Dashboard user={user} tts={tts} logout={logout} open={setCur}
       create={() => { const t = { id: uid(), name: "Timetable " + (tts.length + 1), courses: [] }; setTts([...tts, t]); setCur(t.id); }}
       remove={(id) => window.confirm("Delete this timetable?") && setTts(tts.filter((t) => t.id !== id))}
-      cloudMode={Boolean(session)} cloudStatus={cloudStatus} onGoogleLogin={handleGoogleLogin} />;
+      cloudMode={Boolean(session)} cloudStatus={cloudStatus} onGoogleLogin={handleGoogleLogin}
+      {...collaborationProps} />;
   }
-  return <Planner tt={tt} user={user} back={() => setCur(null)} logout={logout} update={(fn) => setTts((items) => items.map((t) => t.id === tt.id ? fn(t) : t))} customCatalog={customCatalog} onCustomCatalogChange={setCustomCatalog} hiddenCatalogCodes={hiddenCatalogCodes} onHiddenCatalogCodesChange={setHiddenCatalogCodes} cloudMode={Boolean(session)} cloudStatus={cloudStatus} onGoogleLogin={handleGoogleLogin} />;
+  return <Planner tt={tt} user={user} back={() => { if (activeCollab) leaveCollaborationRoom(); else setCur(null); }} logout={logout}
+    update={activeCollab ? updateCollaborationTimetable : (fn) => setTts((items) => items.map((t) => t.id === tt.id ? fn(t) : t))}
+    customCatalog={customCatalog} onCustomCatalogChange={setCustomCatalog} hiddenCatalogCodes={hiddenCatalogCodes}
+    onHiddenCatalogCodesChange={setHiddenCatalogCodes} cloudMode={Boolean(session)} cloudStatus={cloudStatus} onGoogleLogin={handleGoogleLogin}
+    {...collaborationProps} />;
 }
 
 function Login({ onLogin, onGoogleLogin, authError, authBusy, cloudConfigured }) {
@@ -224,20 +620,20 @@ function Login({ onLogin, onGoogleLogin, authError, authBusy, cloudConfigured })
         <section className="welcome-panel">
           <div className="brand-lockup"><div className="brand-mark">F</div><span>FFCS <b>Planner</b></span></div>
           <div className="eyebrow"><span className="status-dot" /> MADE FOR VIT VELLORE</div>
-          <h1>Your semester,<br /><em>beautifully</em> organised.</h1>
-          <p className="welcome-copy">Build a clash-free weekly timetable, keep an eye on credits, and make FFCS choices with a little more confidence.</p>
+          <h1>Plan your FFCS<br /><em>semester.</em></h1>
+          <p className="welcome-copy">Choose your courses, check for slot clashes, and keep your credits in one place.</p>
           <div className="feature-stack">
             <div className="feature-item"><span className="feature-icon">▦</span><span><b>Your week at a glance</b><small>Every slot in one clear timetable</small></span></div>
             <div className="feature-item"><span className="feature-icon">✳</span><span><b>Catch clashes early</b><small>Slot conflicts and custom rules</small></span></div>
             <div className="feature-item"><span className="feature-icon">↗</span><span><b>Pick up where you left off</b><small>Google sign-in with cloud sync</small></span></div>
           </div>
-          <div className="welcome-footer">A calmer way to plan your semester <span>✦</span></div>
+          <div className="welcome-footer">A simple planner for your semester <span>✦</span></div>
         </section>
 
         <section className="auth-panel card">
-          <div className="auth-panel-top"><span className="mut">WELCOME BACK</span><span className="secure-label"><span>●</span> STUDENT SPACE</span></div>
-          <h2>Sign in to your planner</h2>
-          <p className="mut intro">Use your Google account to save your timetable securely and continue on any device. No custom backend is required.</p>
+          <div className="auth-panel-top"><span className="mut">STUDENT SIGN-IN</span><span className="secure-label"><span>●</span> PRIVATE ACCOUNT</span></div>
+          <h2>Sign in to save your timetable</h2>
+          <p className="mut intro">Use Google to keep your timetable backed up and open it on another device, or continue in this browser.</p>
 
           <div className="google-login-block">
             <button className="btn google-btn full-btn" type="button" onClick={onGoogleLogin} disabled={authBusy || !cloudConfigured}>
@@ -278,22 +674,22 @@ function AppHeader({ user, logout, cloudMode, cloudStatus, children, onGoogleLog
   );
 }
 
-function Dashboard({ user, tts, logout, open, create, remove, cloudMode, cloudStatus, onGoogleLogin }) {
+function Dashboard({ user, tts, logout, open, create, remove, cloudMode, cloudStatus, onGoogleLogin, activeCollab, collabOpen, pendingRoomId, collabBusy, collabError, openCollab, closeCollab, createCollab, joinCollab, leaveCollab, clearCollabError, firebaseConfigured }) {
   const totalCourses = tts.reduce((sum, t) => sum + t.courses.length, 0);
   const totalCredits = tts.reduce((sum, t) => sum + t.courses.reduce((a, c) => a + c.credits, 0), 0);
   return (
     <>
       <AppHeader user={user} logout={logout} cloudMode={cloudMode} cloudStatus={cloudStatus} onGoogleLogin={onGoogleLogin} />
       <div className="wrap dashboard-wrap">
-        <div className="dashboard-hero"><div><div className="eyebrow">YOUR ACADEMIC WORKSPACE</div><h1>Good to have you here{user.n ? `, ${user.n.split(" ")[0]}` : ""}.</h1><p className="mut">Plan your semester around the classes that matter.</p></div><button className="btn p create-btn" onClick={create}>＋ Create timetable</button></div>
+        <div className="dashboard-hero"><div><div className="eyebrow">FFCS PLANNER</div><h1>Let’s plan your semester{user.n ? `, ${user.n.split(" ")[0]}` : ""}.</h1><p className="mut">Keep your courses, slots and credits together.</p></div><div className="dashboard-hero-actions"><button className="btn s ghost-btn" onClick={openCollab}>↗ Join a room</button><button className="btn p create-btn" onClick={create}>＋ Create timetable</button></div></div>
         <div className="stats-row">
           <div className="stat-card"><span className="stat-label">TIMETABLES</span><b>{tts.length.toString().padStart(2, "0")}</b><small>semester plans</small></div>
           <div className="stat-card"><span className="stat-label">COURSES ADDED</span><b>{totalCourses.toString().padStart(2, "0")}</b><small>across all timetables</small></div>
           <div className="stat-card"><span className="stat-label">TOTAL CREDITS</span><b>{totalCredits}</b><small>planned credits</small></div>
         </div>
-        <div className="section-heading"><div><h2>Your timetables</h2><p className="mut">Open a plan to edit slots, courses and preferences.</p></div><span className="section-count">{tts.length} {tts.length === 1 ? "plan" : "plans"}</span></div>
+        <div className="section-heading"><div><h2>Your semester plans</h2><p className="mut">Open a plan to add courses, check clashes or update slots.</p></div><span className="section-count">{tts.length} {tts.length === 1 ? "plan" : "plans"}</span></div>
         <div className="timetable-cards">
-          {tts.length === 0 && <div className="empty-state"><div className="empty-icon">▦</div><h3>Your first plan starts here</h3><p className="mut">Create a timetable and begin adding courses. Slot clashes are checked as you go.</p><button className="btn p" onClick={create}>Create your first timetable →</button></div>}
+          {tts.length === 0 && <div className="empty-state"><div className="empty-icon">▦</div><h3>No timetables yet</h3><p className="mut">Create a plan, then add your courses to see your weekly schedule and total credits.</p><button className="btn p" onClick={create}>＋ Create timetable</button></div>}
           {tts.map((t, index) => (
             <div key={t.id} className="timetable-card" onClick={() => open(t.id)} role="button" tabIndex={0} onKeyDown={(ev) => { if (ev.key === "Enter") open(t.id); }}>
               <div className="timetable-card-top"><span className={`timetable-symbol symbol-${index % 4}`}>▦</span><button className="icon-button delete-button" title="Delete timetable" onClick={(ev) => { ev.stopPropagation(); remove(t.id); }}>✕</button></div>
@@ -303,6 +699,7 @@ function Dashboard({ user, tts, logout, open, create, remove, cloudMode, cloudSt
           ))}
         </div>
       </div>
+      <CollaborateModal open={collabOpen} pendingRoomId={pendingRoomId} canCreate={false} busy={collabBusy} error={collabError} firebaseConfigured={firebaseConfigured} onClose={closeCollab} onCreate={createCollab} onJoin={joinCollab} onClearError={clearCollabError} />
     </>
   );
 }
@@ -387,7 +784,7 @@ function SearchableSelect({ label, options, value, onChange, placeholder, search
   );
 }
 
-function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalogChange, hiddenCatalogCodes, onHiddenCatalogCodesChange, cloudMode, cloudStatus, onGoogleLogin }) {
+function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalogChange, hiddenCatalogCodes, onHiddenCatalogCodesChange, cloudMode, cloudStatus, onGoogleLogin, activeCollab, collabOpen, pendingRoomId, collabBusy, collabError, openCollab, closeCollab, createCollab, joinCollab, leaveCollab, clearCollabError, firebaseConfigured }) {
   const [f, setF] = useState(blank);
   const [slots, setSlots] = useState("");
   const [catalogCode, setCatalogCode] = useState("");
@@ -398,6 +795,30 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
   const [importMessage, setImportMessage] = useState("");
   const [catalogManageMessage, setCatalogManageMessage] = useState("");
   const [err, setErr] = useState("");
+  const [editingCreditsFor, setEditingCreditsFor] = useState(null);
+  const [editedCredits, setEditedCredits] = useState("");
+  const [editCreditsError, setEditCreditsError] = useState("");
+  const [copyFeedback, setCopyFeedback] = useState("");
+  const copyRoomValue = async (value, label) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const area = document.createElement("textarea");
+        area.value = value;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        const copied = document.execCommand("copy");
+        area.remove();
+        if (!copied) throw new Error("Copy is not supported in this browser.");
+      }
+      setCopyFeedback(`${label} copied to clipboard.`);
+    } catch {
+      setCopyFeedback(`Couldn't copy the ${label.toLowerCase()}. Select the text and copy it manually.`);
+    }
+  };
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const availableCatalog = [...courseCatalog.filter((course) => !hiddenCatalogCodes.includes(course.code)), ...customCatalog.filter((course) => !hiddenCatalogCodes.includes(course.code))];
   const selectedCatalogCourse = availableCatalog.find((c) => c.code === catalogCode);
@@ -462,6 +883,24 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
 
   const removeCourse = (id) => update((t) => ({ ...t, courses: t.courses.filter((c) => c.id !== id) }));
 
+  const beginEditCredits = (course) => {
+    setEditingCreditsFor(course.id);
+    setEditedCredits(String(course.credits ?? ""));
+    setEditCreditsError("");
+  };
+  const saveEditedCredits = (event) => {
+    event?.preventDefault();
+    const value = Number(editedCredits);
+    if (editedCredits.trim() === "" || !Number.isFinite(value) || value < 0 || value > 50) {
+      setEditCreditsError("Enter a valid credit value between 0 and 50.");
+      return;
+    }
+    update((t) => ({ ...t, courses: t.courses.map((course) => course.id === editingCreditsFor ? { ...course, credits: value } : course) }));
+    setEditingCreditsFor(null);
+    setEditedCredits("");
+    setEditCreditsError("");
+  };
+
   const removeCatalogSubject = () => {
     const subject = availableCatalog.find((course) => course.code === manageCatalogCode);
     if (!subject) return;
@@ -494,11 +933,12 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
     <>
       <AppHeader user={user} logout={logout} cloudMode={cloudMode} cloudStatus={cloudStatus} onGoogleLogin={onGoogleLogin}>
         <button className="btn s ghost-btn back-btn" onClick={back}>← All plans</button>
-        <input aria-label="Timetable name" className="t timetable-name" value={tt.name} onChange={(ev) => update((t) => ({ ...t, name: ev.target.value }))} />
+        <input aria-label="Timetable name" className="t timetable-name" value={tt.name} onChange={(ev) => { const value = ev.target.value; update((t) => ({ ...t, name: value })); }} />
         <button className="btn s ghost-btn print-btn" onClick={() => window.print()}>↗ Export / Print</button>
       </AppHeader>
       <div className="wrap planner-wrap">
-        <div className="planner-heading"><div><div className="eyebrow">SEMESTER BUILDER</div><h1>Shape your week.</h1><p className="mut">Add your courses first, then use the timetable below to fine-tune each slot.</p></div><div className="heading-metrics"><div><b>{tt.courses.length.toString().padStart(2, "0")}</b><small>COURSES</small></div><div><b>{credits}</b><small>CREDITS</small></div></div></div>
+        <div className="planner-heading"><div><div className="eyebrow">YOUR SEMESTER</div><h1>{activeCollab ? "Plan together, live." : "Build your timetable."}</h1><p className="mut">{activeCollab ? "Everyone in this room sees timetable changes as they happen." : "Add courses below. We’ll flag slot clashes as you go."}</p></div><div className="planner-heading-actions"><div className="heading-metrics"><div><b>{tt.courses.length.toString().padStart(2, "0")}</b><small>COURSES</small></div><div><b>{credits}</b><small>CREDITS</small></div></div><button className={`btn ${activeCollab ? "s ghost-btn" : "p"} collaborate-trigger`} onClick={openCollab} disabled={Boolean(activeCollab)} title={activeCollab ? "Use the room controls below while collaborating" : "Create or join a shared timetable room"}>{activeCollab ? "● Collaboration active" : "↗ Collaborate"}</button></div></div>
+        {activeCollab && <section className="collab-room-banner"><div className="collab-room-icon">↗</div><div className="collab-room-main"><div className="collab-room-title"><b>Live collaboration room</b><span className="live-pill"><i /> LIVE</span></div><p>{activeCollab.data?.participants?.length || 1} {((activeCollab.data?.participants?.length || 1) === 1) ? "person has" : "people have"} joined this room. Changes to courses, slots, rules and credits sync automatically.</p><div className="collab-share-details"><span><small>ROOM CODE</small><b>{activeCollab.code}</b></span><button type="button" className="btn s ghost-btn" onClick={() => copyRoomValue(activeCollab.code, "Room code")}>Copy code</button><span className="collab-link-preview" title={activeCollab.link}><small>SHARE LINK</small><b>{activeCollab.link}</b></span><button type="button" className="btn s ghost-btn" onClick={() => copyRoomValue(activeCollab.link, "Share link")}>Copy link</button></div>{copyFeedback && <p className="copy-feedback" role="status">{copyFeedback}</p>}{collabError && <p className="err collab-inline-error" role="alert">{collabError}</p>}</div><button type="button" className="btn s ghost-btn leave-room-btn" onClick={leaveCollab}>Leave room</button></section>}
 
         <section className="card course-builder">
           <div className="builder-top"><div className="builder-title"><span className="builder-icon">＋</span><div><h2>Add a course</h2><p className="mut">Course details and slot selection</p></div></div><span className="builder-note"><span className="tiny-dot" /> Clash checking is on</span></div>
@@ -563,7 +1003,7 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
 
           <div className="catalog-management-panel">
             <div className="catalog-management-heading">
-              <div><h3>Manage course dropdown</h3><p className="mut">Remove an unwanted subject and all of its faculty/class options. This does not remove a course already placed in your timetable.</p></div>
+              <div><h3>Manage course list</h3><p className="mut">Remove a subject and its faculty options from the dropdown. Courses already in this timetable will stay until you remove them separately.</p></div>
               <span className="catalog-count">{availableCatalog.length} subjects</span>
             </div>
             <div className="catalog-management-controls">
@@ -576,7 +1016,7 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
                 searchPlaceholder="Search subject to remove…"
                 emptyMessage="No subjects match that search."
               />
-              <button className="btn danger-btn remove-catalog-btn" type="button" onClick={removeCatalogSubject} disabled={!manageCatalogCode}>Remove subject + faculty options</button>
+              <button className="btn danger-btn remove-catalog-btn" type="button" onClick={removeCatalogSubject} disabled={!manageCatalogCode}>Remove subject and faculty options</button>
             </div>
             <div className="catalog-management-footer">
               <p className="catalog-manage-feedback" role="status">{catalogManageMessage}</p>
@@ -595,7 +1035,7 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
             <div className="builder-actions"><div className="err builder-error">{err}</div><button className="btn p add-btn" type="submit">＋ Add to timetable</button></div>
           </form>
           {tt.courses.length > 0 && <div className="course-list-wrap"><div className="course-list-heading"><span>ADDED COURSES <b>{tt.courses.length}</b></span><small>Remove a course with ×</small></div><div className="course-list">
-            {tt.courses.map((c) => <div className="course-chip" key={c.id}><span className="course-chip-color" style={{ background: c.color }} /><div className="course-chip-text"><b>{c.code || c.title || "Untitled course"}</b><small>{c.title && c.code ? c.title : c.slots.join(" + ")} · {c.credits} cr</small></div><button className="icon-button" onClick={() => removeCourse(c.id)} title={`Remove ${c.code || c.title}`}>×</button></div>)}
+            {tt.courses.map((c) => <div className="course-chip" key={c.id}><span className="course-chip-color" style={{ background: c.color }} /><div className="course-chip-text"><b>{c.code || c.title || "Untitled course"}</b><small>{c.title && c.code ? c.title : c.slots.join(" + ")} · {c.credits} cr</small></div><button className="course-edit-btn" type="button" onClick={() => beginEditCredits(c)} title={`Edit credits for ${c.code || c.title}`}>Edit</button><button className="icon-button" onClick={() => removeCourse(c.id)} title={`Remove ${c.code || c.title}`}>×</button></div>)}
           </div></div>}
         </section>
 
@@ -638,13 +1078,65 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
         </section>
         <section className="credit-summary" aria-live="polite">
           <div className="credit-summary-icon" aria-hidden="true">✦</div>
-          <div className="credit-summary-copy"><span className="eyebrow">SEMESTER TOTAL</span><h2>Registered credits</h2><p className="mut">Calculated from every subject currently in this timetable.</p></div>
+          <div className="credit-summary-copy"><span className="eyebrow">AT A GLANCE</span><h2>Credits in this timetable</h2><p className="mut">Total credits for the subjects you have added.</p></div>
           <div className="credit-summary-value"><b>{credits}</b><span>{credits === 1 ? "credit" : "credits"}</span></div>
           <div className="credit-summary-divider" />
           <div className="credit-summary-courses"><b>{tt.courses.length}</b><span>{tt.courses.length === 1 ? "subject registered" : "subjects registered"}</span></div>
         </section>
       </div>
+      <CollaborateModal open={collabOpen} pendingRoomId={pendingRoomId} canCreate={!activeCollab} busy={collabBusy} error={collabError} firebaseConfigured={firebaseConfigured} timetable={tt} onClose={closeCollab} onCreate={createCollab} onJoin={joinCollab} onClearError={clearCollabError} />
+      {editingCreditsFor && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setEditingCreditsFor(null); }}><section className="app-modal credits-modal" role="dialog" aria-modal="true" aria-labelledby="edit-credits-title"><div className="modal-heading"><div><span className="eyebrow">COURSE DETAILS</span><h2 id="edit-credits-title">Edit course credits</h2><p className="mut">Correct the credit value without removing this subject.</p></div><button type="button" className="icon-button modal-close" onClick={() => setEditingCreditsFor(null)} aria-label="Close edit credits">×</button></div><form onSubmit={saveEditedCredits}><label className="modal-field">Credits<input autoFocus type="number" min="0" max="50" step="0.5" value={editedCredits} onChange={(event) => { setEditedCredits(event.target.value); setEditCreditsError(""); }} /></label>{editCreditsError && <p className="err" role="alert">{editCreditsError}</p>}<div className="modal-actions"><button type="button" className="btn s ghost-btn" onClick={() => setEditingCreditsFor(null)}>Cancel</button><button type="submit" className="btn p" disabled={!editedCredits.trim()}>Save credits</button></div></form><p className="modal-footnote">{activeCollab ? "Saved credits sync to everyone in this room immediately." : "The timetable total updates automatically after saving."}</p></section></div>}
     </>
+  );
+}
+
+function CollaborateModal({ open, pendingRoomId, canCreate, busy, error, firebaseConfigured, timetable, onClose, onCreate, onJoin, onClearError }) {
+  const [code, setCode] = useState("");
+  useEffect(() => {
+    if (open) {
+      setCode("");
+      onClearError?.();
+    }
+  }, [open, pendingRoomId]);
+
+  // Mount the collaboration dialog directly under <body>, not inside the
+  // planner layout. This keeps it above every page section and avoids parent
+  // overflow/stacking contexts making it appear at the bottom of the page.
+  useEffect(() => {
+    if (!open) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open, busy]);
+
+  if (!open) return null;
+  return createPortal(
+    <div className="modal-backdrop collab-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <section className="app-modal collab-modal" role="dialog" aria-modal="true" aria-labelledby="collab-modal-title">
+        <div className="modal-heading">
+          <div><span className="eyebrow">WORK ON IT TOGETHER</span><h2 id="collab-modal-title">Collaborate on a timetable</h2><p className="mut">Create a shared room or join one with a link and code. Changes sync live for everyone.</p></div>
+          <button type="button" className="icon-button modal-close" onClick={onClose} disabled={busy} aria-label="Close collaboration">×</button>
+        </div>
+        {!firebaseConfigured && <div className="collab-setup-notice"><b>One-time setup needed</b><p>Live collaboration needs Firebase configured, Firestore rules published, and Anonymous sign-in enabled. Your regular local planner will continue to work without it.</p></div>}
+        {pendingRoomId && <div className="join-link-notice"><span>INVITED TO A ROOM</span><b>{pendingRoomId.slice(0, 8)}…</b><small>Enter the 8-character code shared by the room owner.</small></div>}
+        {canCreate && timetable && <div className="collab-create-option"><div className="collab-option-icon">✦</div><div><b>Create a room for this timetable</b><p>Generate a private room code and shareable link.</p></div><button type="button" className="btn p" onClick={() => onCreate(timetable)} disabled={busy || !firebaseConfigured}>{busy ? "Creating…" : "Create room"}</button></div>}
+        <div className="modal-or"><span /> OR JOIN AN EXISTING ROOM <span /></div>
+        <form onSubmit={(event) => { event.preventDefault(); onJoin(code); }}>
+          <label className="modal-field">8-character room code<input value={code} onChange={(event) => { setCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8)); onClearError?.(); }} placeholder="e.g. 7KPM4XQ9" autoComplete="off" maxLength={8} /></label>
+          <button type="submit" className="btn s collab-join-btn" disabled={busy || code.length < 8 || !firebaseConfigured}>{busy ? "Connecting…" : "Join shared timetable"}</button>
+        </form>
+        {error && <p className="err collab-modal-error" role="alert">{error}</p>}
+        <p className="modal-footnote">Anyone with the share link and room code can join. Only share both with people you trust.</p>
+      </section>
+    </div>,
+    document.body
   );
 }
 
