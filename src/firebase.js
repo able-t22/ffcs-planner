@@ -1,6 +1,7 @@
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
@@ -22,3 +23,6 @@ const app = FIREBASE_CONFIGURED
 // The frontend uses Firebase's client SDK directly; no custom server is needed.
 export const auth = app ? getAuth(app) : null;
 export const db = app ? getFirestore(app) : null;
+// Tutorial media is served from Firebase Storage; keep Storage optional so the
+// planner still works locally when its bucket has not been configured.
+export const storage = app && firebaseConfig.storageBucket ? getStorage(app) : null;

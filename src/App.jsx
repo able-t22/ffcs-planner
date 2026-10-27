@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { DAYS, TH, LB, TM, THEORY_START, THEORY_END, LAB_START, LAB_END, COL, ALL, parseSlots, ruleCols, ruleHits, clashes } from "./slots";
 import courseCatalog from "./courseCatalog.json";
@@ -8,6 +8,33 @@ import { auth, db, FIREBASE_CONFIGURED } from "./firebase";
 
 const KEY = "ffcs-v1";
 const COLLAB_KEY = "ffcs-collab-room-v1";
+const TUTORIAL_GUEST_SEEN_KEY = "ffcs-tutorial-seen-local-v1";
+const TUTORIAL_YOUTUBE_URL = (import.meta.env.VITE_TUTORIAL_YOUTUBE_URL || "https://youtu.be/0gD5SaLifac").trim();
+
+function getYouTubeEmbedUrl(rawUrl) {
+  if (!rawUrl) return "";
+  try {
+    const parsed = new URL(rawUrl);
+    const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    let videoId = "";
+    if (hostname === "youtu.be") {
+      videoId = parsed.pathname.split("/").filter(Boolean)[0] || "";
+    } else if (["youtube.com", "m.youtube.com", "youtube-nocookie.com"].includes(hostname)) {
+      if (parsed.pathname === "/watch") videoId = parsed.searchParams.get("v") || "";
+      else {
+        const match = parsed.pathname.match(/^\/(?:embed|shorts|live)\/([A-Za-z0-9_-]+)/);
+        videoId = match?.[1] || "";
+      }
+    }
+    if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) return "";
+    return `https://www.youtube-nocookie.com/embed/${videoId}?rel=0&playsinline=1&modestbranding=1`;
+  } catch {
+    // Do not embed arbitrary URLs or HTML supplied through environment config.
+    return "";
+  }
+}
+
+const TUTORIAL_YOUTUBE_EMBED_URL = getYouTubeEmbedUrl(TUTORIAL_YOUTUBE_URL);
 const uid = () => Math.random().toString(36).slice(2, 9);
 const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } };
 
@@ -47,6 +74,41 @@ function App() {
   const [collabBusy, setCollabBusy] = useState(false);
   const [collabError, setCollabError] = useState("");
   const [authRevision, setAuthRevision] = useState(0);
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+
+  const openTutorial = useCallback(() => setTutorialOpen(true), []);
+  const closeTutorial = useCallback(async () => {
+    setTutorialOpen(false);
+    const uidForTutorial = session?.uid;
+    if (uidForTutorial && db) {
+      // Store the dismissal on this account, not in a browser-wide flag.
+      try {
+        await setDoc(doc(db, "users", uidForTutorial), {
+          ownerUid: uidForTutorial,
+          tutorialSeen: true,
+          tutorialSeenAt: serverTimestamp(),
+        }, { merge: true });
+      } catch (error) {
+        console.warn("Could not save tutorial dismissal for this account:", error);
+      }
+    } else {
+      try { localStorage.setItem(TUTORIAL_GUEST_SEEN_KEY, "true"); } catch { /* Tutorial still closes for this session. */ }
+    }
+  }, [session?.uid]);
+
+  const handleLocalLogin = (profile) => setUser(profile);
+
+  // Local/guest users get the introduction once per browser. Google accounts
+  // use the tutorialSeen field in their own Firestore document instead.
+  useEffect(() => {
+    if (!authInitialized || session || !user) return;
+    if (new URLSearchParams(window.location.search).has("room")) return;
+    try {
+      if (localStorage.getItem(TUTORIAL_GUEST_SEEN_KEY) !== "true") setTutorialOpen(true);
+    } catch {
+      setTutorialOpen(true);
+    }
+  }, [authInitialized, session?.uid, user?.email, user?.n]);
 
   // Firebase restores a signed-in Google account automatically on page reload.
   useEffect(() => {
@@ -61,6 +123,7 @@ function App() {
       setSession(accountUser);
       setAuthInitialized(true);
       setAuthRevision((revision) => revision + 1);
+      setTutorialOpen(false);
       setAuthError("");
       if (accountUser) {
         setAccountDataReview(null);
@@ -150,6 +213,9 @@ function App() {
           setHiddenCatalogCodes(selectedHiddenCatalogCodes);
           setDataReady(true);
           setCloudStatus("Account connected");
+          // Every signed-in account is shown the tutorial once, whether it is a
+          // new account or an older account that has not dismissed this tutorial.
+          setTutorialOpen(saved?.tutorialSeen !== true && !new URLSearchParams(window.location.search).has("room"));
         }
       } catch (error) {
         if (alive) {
@@ -460,6 +526,7 @@ function App() {
     setAccountReviewError("");
     setDataReady(true);
     setCloudStatus("Verifying account ownership…");
+    setTutorialOpen(saved?.tutorialSeen !== true && !new URLSearchParams(window.location.search).has("room"));
   };
 
   const startFreshAccountData = async () => {
@@ -476,6 +543,7 @@ function App() {
       setAccountDataReview(null);
       setDataReady(true);
       setCloudStatus("Starting a private planner…");
+      setTutorialOpen(!new URLSearchParams(window.location.search).has("room"));
     } catch (error) {
       setAccountReviewError(error.message || "Could not reset this account's saved planner. Check the Firestore security rules.");
     } finally {
@@ -569,7 +637,7 @@ function App() {
     return <div className="center"><div className="card loading-card"><div className="brand-mark">F</div><h2>Opening your planner</h2><p className="mut">Getting your saved timetable from Firebase…</p>{cloudLoadError && <><div className="err cloud-error">{cloudLoadError}</div><button className="btn p" onClick={() => setLoadAttempt((n) => n + 1)}>Try again</button><button className="text-btn" onClick={logout}>Sign out</button></>}</div></div>;
   }
 
-  if (!user) return <Login onLogin={setUser} onGoogleLogin={handleGoogleLogin} authError={authError} authBusy={authBusy} cloudConfigured={FIREBASE_CONFIGURED} />;
+  if (!user) return <Login onLogin={handleLocalLogin} onGoogleLogin={handleGoogleLogin} authError={authError} authBusy={authBusy} cloudConfigured={FIREBASE_CONFIGURED} />;
   const localTt = tts.find((t) => t.id === cur);
   const tt = activeCollab?.data?.timetable || (!activeCollab ? localTt : null);
   const collaborationProps = {
@@ -594,12 +662,14 @@ function App() {
       create={() => { const t = { id: uid(), name: "Timetable " + (tts.length + 1), courses: [] }; setTts([...tts, t]); setCur(t.id); }}
       remove={(id) => window.confirm("Delete this timetable?") && setTts(tts.filter((t) => t.id !== id))}
       cloudMode={Boolean(session)} cloudStatus={cloudStatus} onGoogleLogin={handleGoogleLogin}
+      openTutorial={openTutorial} tutorialOpen={tutorialOpen} closeTutorial={closeTutorial}
       {...collaborationProps} />;
   }
   return <Planner tt={tt} user={user} back={() => { if (activeCollab) leaveCollaborationRoom(); else setCur(null); }} logout={logout}
     update={activeCollab ? updateCollaborationTimetable : (fn) => setTts((items) => items.map((t) => t.id === tt.id ? fn(t) : t))}
     customCatalog={customCatalog} onCustomCatalogChange={setCustomCatalog} hiddenCatalogCodes={hiddenCatalogCodes}
     onHiddenCatalogCodesChange={setHiddenCatalogCodes} cloudMode={Boolean(session)} cloudStatus={cloudStatus} onGoogleLogin={handleGoogleLogin}
+    openTutorial={openTutorial} tutorialOpen={tutorialOpen} closeTutorial={closeTutorial}
     {...collaborationProps} />;
 }
 
@@ -660,13 +730,14 @@ function Login({ onLogin, onGoogleLogin, authError, authBusy, cloudConfigured })
   );
 }
 
-function AppHeader({ user, logout, cloudMode, cloudStatus, children, onGoogleLogin }) {
+function AppHeader({ user, logout, cloudMode, cloudStatus, children, onGoogleLogin, onTutorialClick }) {
   return (
     <header className="app-header">
       <div className="brand-lockup compact"><div className="brand-mark">F</div><span>FFCS <b>Planner</b></span></div>
       {children}
       <span className="header-spacer" />
       {cloudMode && <span className="cloud-indicator" title={cloudStatus}><span className={cloudStatus === "All changes saved" ? "cloud-dot saved" : "cloud-dot"} />{cloudStatus || "Cloud account"}</span>}
+      {onTutorialClick && <button className="btn s ghost-btn tutorial-trigger" type="button" onClick={onTutorialClick} title="Watch the custom course and faculty import tutorial"><span aria-hidden="true">▶</span> Tutorial</button>}
       {!cloudMode && onGoogleLogin && <button className="btn s google-connect-btn" onClick={onGoogleLogin}>↗ Connect Google</button>}
       <div className="profile-chip"><span className="avatar">{(user.n || user.email || "S").slice(0, 1).toUpperCase()}</span><span className="profile-text"><b>{user.n || "Student"}</b><small>{user.email || user.r || "Local account"}</small></span></div>
       <button className="btn s ghost-btn" onClick={logout}>Sign out</button>
@@ -674,12 +745,12 @@ function AppHeader({ user, logout, cloudMode, cloudStatus, children, onGoogleLog
   );
 }
 
-function Dashboard({ user, tts, logout, open, create, remove, cloudMode, cloudStatus, onGoogleLogin, activeCollab, collabOpen, pendingRoomId, collabBusy, collabError, openCollab, closeCollab, createCollab, joinCollab, leaveCollab, clearCollabError, firebaseConfigured }) {
+function Dashboard({ user, tts, logout, open, create, remove, cloudMode, cloudStatus, onGoogleLogin, activeCollab, collabOpen, pendingRoomId, collabBusy, collabError, openCollab, closeCollab, createCollab, joinCollab, leaveCollab, clearCollabError, firebaseConfigured, openTutorial, tutorialOpen, closeTutorial }) {
   const totalCourses = tts.reduce((sum, t) => sum + t.courses.length, 0);
   const totalCredits = tts.reduce((sum, t) => sum + t.courses.reduce((a, c) => a + c.credits, 0), 0);
   return (
     <>
-      <AppHeader user={user} logout={logout} cloudMode={cloudMode} cloudStatus={cloudStatus} onGoogleLogin={onGoogleLogin} />
+      <AppHeader user={user} logout={logout} cloudMode={cloudMode} cloudStatus={cloudStatus} onGoogleLogin={onGoogleLogin} onTutorialClick={openTutorial} />
       <div className="wrap dashboard-wrap">
         <div className="dashboard-hero"><div><div className="eyebrow">FFCS PLANNER</div><h1>Let’s plan your semester{user.n ? `, ${user.n.split(" ")[0]}` : ""}.</h1><p className="mut">Keep your courses, slots and credits together.</p></div><div className="dashboard-hero-actions"><button className="btn s ghost-btn" onClick={openCollab}>↗ Join a room</button><button className="btn p create-btn" onClick={create}>＋ Create timetable</button></div></div>
         <div className="stats-row">
@@ -700,6 +771,7 @@ function Dashboard({ user, tts, logout, open, create, remove, cloudMode, cloudSt
         </div>
       </div>
       <CollaborateModal open={collabOpen} pendingRoomId={pendingRoomId} canCreate={false} busy={collabBusy} error={collabError} firebaseConfigured={firebaseConfigured} onClose={closeCollab} onCreate={createCollab} onJoin={joinCollab} onClearError={clearCollabError} />
+      <TutorialModal open={tutorialOpen} onClose={closeTutorial} />
     </>
   );
 }
@@ -784,7 +856,7 @@ function SearchableSelect({ label, options, value, onChange, placeholder, search
   );
 }
 
-function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalogChange, hiddenCatalogCodes, onHiddenCatalogCodesChange, cloudMode, cloudStatus, onGoogleLogin, activeCollab, collabOpen, pendingRoomId, collabBusy, collabError, openCollab, closeCollab, createCollab, joinCollab, leaveCollab, clearCollabError, firebaseConfigured }) {
+function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalogChange, hiddenCatalogCodes, onHiddenCatalogCodesChange, cloudMode, cloudStatus, onGoogleLogin, activeCollab, collabOpen, pendingRoomId, collabBusy, collabError, openCollab, closeCollab, createCollab, joinCollab, leaveCollab, clearCollabError, firebaseConfigured, openTutorial, tutorialOpen, closeTutorial }) {
   const [f, setF] = useState(blank);
   const [slots, setSlots] = useState("");
   const [catalogCode, setCatalogCode] = useState("");
@@ -931,7 +1003,7 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
 
   return (
     <>
-      <AppHeader user={user} logout={logout} cloudMode={cloudMode} cloudStatus={cloudStatus} onGoogleLogin={onGoogleLogin}>
+      <AppHeader user={user} logout={logout} cloudMode={cloudMode} cloudStatus={cloudStatus} onGoogleLogin={onGoogleLogin} onTutorialClick={openTutorial}>
         <button className="btn s ghost-btn back-btn" onClick={back}>← All plans</button>
         <input aria-label="Timetable name" className="t timetable-name" value={tt.name} onChange={(ev) => { const value = ev.target.value; update((t) => ({ ...t, name: value })); }} />
         <button className="btn s ghost-btn print-btn" onClick={() => window.print()}>↗ Export / Print</button>
@@ -1118,7 +1190,66 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
       </div>
       <CollaborateModal open={collabOpen} pendingRoomId={pendingRoomId} canCreate={!activeCollab} busy={collabBusy} error={collabError} firebaseConfigured={firebaseConfigured} timetable={tt} onClose={closeCollab} onCreate={createCollab} onJoin={joinCollab} onClearError={clearCollabError} />
       {editingCreditsFor && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setEditingCreditsFor(null); }}><section className="app-modal credits-modal" role="dialog" aria-modal="true" aria-labelledby="edit-credits-title"><div className="modal-heading"><div><span className="eyebrow">COURSE DETAILS</span><h2 id="edit-credits-title">Edit course credits</h2><p className="mut">Correct the credit value without removing this subject.</p></div><button type="button" className="icon-button modal-close" onClick={() => setEditingCreditsFor(null)} aria-label="Close edit credits">×</button></div><form onSubmit={saveEditedCredits}><label className="modal-field">Credits<input autoFocus type="number" min="0" max="50" step="0.5" value={editedCredits} onChange={(event) => { setEditedCredits(event.target.value); setEditCreditsError(""); }} /></label>{editCreditsError && <p className="err" role="alert">{editCreditsError}</p>}<div className="modal-actions"><button type="button" className="btn s ghost-btn" onClick={() => setEditingCreditsFor(null)}>Cancel</button><button type="submit" className="btn p" disabled={!editedCredits.trim()}>Save credits</button></div></form><p className="modal-footnote">{activeCollab ? "Saved credits sync to everyone in this room immediately." : "The timetable total updates automatically after saving."}</p></section></div>}
+      <TutorialModal open={tutorialOpen} onClose={closeTutorial} />
     </>
+  );
+}
+
+function TutorialModal({ open, onClose }) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (event) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+  const invalidConfiguredUrl = Boolean(TUTORIAL_YOUTUBE_URL && !TUTORIAL_YOUTUBE_EMBED_URL);
+  return createPortal(
+    <div className="modal-backdrop tutorial-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="app-modal tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-modal-title">
+        <div className="modal-heading">
+          <div><span className="eyebrow">QUICK START GUIDE</span><h2 id="tutorial-modal-title">Add your own course and faculty list</h2><p className="mut">A short walkthrough from VTOP to your searchable FFCS dropdown.</p></div>
+          <button type="button" className="icon-button modal-close" onClick={onClose} aria-label="Close tutorial">×</button>
+        </div>
+        <div className="tutorial-video-frame">
+          {TUTORIAL_YOUTUBE_EMBED_URL ? (
+            <iframe
+              title="FFCS custom course and faculty import tutorial"
+              src={TUTORIAL_YOUTUBE_EMBED_URL}
+              loading="lazy"
+              referrerPolicy="strict-origin-when-cross-origin"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              allowFullScreen
+            />
+          ) : (
+            <div className="tutorial-video-placeholder">
+              <span className="tutorial-play-icon">▶</span>
+              <b>{invalidConfiguredUrl ? "Check your YouTube link" : "Course import walkthrough"}</b>
+              <span>{invalidConfiguredUrl
+                ? "Use a YouTube watch, youtu.be, Shorts, or embed link in VITE_TUTORIAL_YOUTUBE_URL."
+                : "The tutorial video is configured. If it does not load, open it directly on YouTube."}</span>
+              <code>https://youtu.be/0gD5SaLifac</code>
+            </div>
+          )}
+        </div>
+        {invalidConfiguredUrl && <div className="tutorial-storage-note" role="status"><b>Invalid YouTube URL</b><p>Use the full video URL from YouTube. Update VITE_TUTORIAL_YOUTUBE_URL in .env.local, restart Vite, and add the same variable in Vercel before redeploying.</p></div>}
+        <div className="tutorial-steps">
+          <div className="tutorial-step"><span>1</span><div><b>Sign in to VTOP</b><p>Open VTOP yourself and sign in with your own credentials. Never share your password or OTP.</p></div></div>
+          <div className="tutorial-step"><span>2</span><div><b>Open the subject's faculty / class list</b><p>Find the table containing Slot Detail, Venue, Faculty and Course Type.</p></div></div>
+          <div className="tutorial-step"><span>3</span><div><b>Copy the table rows</b><p>Include the header row and the available offerings. Copy the table from VTOP.</p></div></div>
+          <div className="tutorial-step"><span>4</span><div><b>Paste into FFCS Planner</b><p>Under “Import your own subject faculty list”, enter the subject name and paste the copied table.</p></div></div>
+          <div className="tutorial-step"><span>5</span><div><b>Parse and save the subject</b><p>Click “Parse and save subject”. The valid rows become searchable faculty / class options. Select one and enter course credits manually.</p></div></div>
+        </div>
+        <div className="tutorial-footer"><span>Tip: use a YouTube Unlisted video. Firebase Storage is not needed for the tutorial.</span><button type="button" className="btn p" onClick={onClose}>Got it</button></div>
+      </section>
+    </div>,
+    document.body
   );
 }
 
