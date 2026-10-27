@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { DAYS, TH, LB, TM, COL, ALL, parseSlots, owner, ruleCols, ruleHits, clashes } from "./slots";
+import { DAYS, TH, LB, TM, THEORY_START, THEORY_END, LAB_START, LAB_END, COL, ALL, parseSlots, ruleCols, ruleHits, clashes } from "./slots";
 import courseCatalog from "./courseCatalog.json";
 import { onAuthStateChanged, GoogleAuthProvider, signInAnonymously, signInWithPopup, signOut as firebaseSignOut } from "firebase/auth";
 import { arrayUnion, collection, deleteDoc, doc, getDoc, onSnapshot, runTransaction, serverTimestamp, setDoc, updateDoc, writeBatch } from "firebase/firestore";
@@ -1049,27 +1049,59 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
           </div>
           {bad.length > 0 && <div className="warn">⚠ <b>Rule conflicts:</b> {bad.map((c) => `${c.code || c.title} (${ruleHits(c, rules).join(", ")})`).join("; ")}</div>}
           <div className="tw">
-            <table className="timetable">
-              <colgroup><col className="day-col" />{TM.map((h) => <col key={h} className={h === "LUNCH" ? "lunch-col" : "time-col"} />)}</colgroup>
-              <thead><tr><th className="day-heading">DAY</th>{TM.map((h) => h === "LUNCH" ? <th key={h} className="lun"><span>BREAK</span></th> : <th key={h}>{h}</th>)}</tr></thead>
+            <table className="timetable timetable-split-view">
+              <colgroup>
+                <col className="day-col" />
+                <col className="class-col" />
+                {TM.map((h, i) => <col key={`${h}-${i}`} className={h === "LUNCH" ? "lunch-col" : "time-col"} />)}
+              </colgroup>
+              <thead>
+                <tr className="timing-row theory-timing-row">
+                  <th className="timing-category theory-time-category" rowSpan={2}>THEORY</th>
+                  <th className="timing-label">Start</th>
+                  {THEORY_START.map((time, i) => <th key={`theory-start-${i}`} className={TM[i] === "LUNCH" ? "lun timing-lunch" : "timing-value"}>{time}</th>)}
+                </tr>
+                <tr className="timing-row theory-timing-row">
+                  <th className="timing-label">End</th>
+                  {THEORY_END.map((time, i) => <th key={`theory-end-${i}`} className={TM[i] === "LUNCH" ? "lun timing-lunch" : "timing-value"}>{time}</th>)}
+                </tr>
+                <tr className="timing-row lab-timing-row">
+                  <th className="timing-category lab-time-category" rowSpan={2}>LAB</th>
+                  <th className="timing-label">Start</th>
+                  {LAB_START.map((time, i) => <th key={`lab-start-${i}`} className={TM[i] === "LUNCH" ? "lun timing-lunch" : "timing-value"}>{time}</th>)}
+                </tr>
+                <tr className="timing-row lab-timing-row">
+                  <th className="timing-label">End</th>
+                  {LAB_END.map((time, i) => <th key={`lab-end-${i}`} className={TM[i] === "LUNCH" ? "lun timing-lunch" : "timing-value"}>{time}</th>)}
+                </tr>
+              </thead>
               <tbody>
                 {DAYS.map((d) => (
-                  <tr key={d}>
-                    <td className="day-name">{d}</td>
-                    {TM.map((h, i) => {
-                      if (h === "LUNCH") return <td key={h} className="lun lunch-cell"><span>BREAK</span></td>;
-                      const theory = TH[d][i], lab = LB[d][i], course = owner(tt.courses, d, i);
-                      const tag = (slot) => slot !== "-" && <button type="button" key={slot} className={`tag${!course && parsedSlots.includes(slot) ? " on" : ""}`} disabled={Boolean(course)} onClick={() => toggle(slot)} title={course ? "This time is occupied" : `Use slot ${slot}`}>{slot}</button>;
-                      return (
-                        <td key={h}>
-                          <div className={`cell ${course ? "filled" : "empty"}${course && cols.includes(i) ? " viol" : ""}`} style={course ? { background: course.color } : undefined}>
-                            <div className="tags">{tag(theory)}{tag(lab)}</div>
-                            {course && <><b title={course.title || course.code}>{course.title || course.code}</b><i title={course.faculty}>{course.faculty}</i>{course.venue && <i title={course.venue}>{course.venue}</i>}<span className="cell-code">{course.code} · {course.credits} cr</span></>}
-                          </div>
-                        </td>
-                      );
-                    })}
-                  </tr>
+                  <Fragment key={d}>
+                    <tr className="theory-schedule-row">
+                      <td className="day-name" rowSpan={2}>{d}</td>
+                      <td className="class-type theory-type">THEORY</td>
+                      {TH[d].map((slot, i) => {
+                        if (TM[i] === "LUNCH") return <td key={`theory-lunch-${i}`} className="lun lunch-cell"><span>LUNCH</span></td>;
+                        const course = slot !== "-" && slot !== "|" ? tt.courses.find((candidate) => candidate.slots.includes(slot)) : null;
+                        const slotTag = slot !== "-" && slot !== "|"
+                          ? <button type="button" key={slot} className={`tag${!course && parsedSlots.includes(slot) ? " on" : ""}`} disabled={Boolean(course)} onClick={() => toggle(slot)} title={course ? "This time is occupied" : `Use slot ${slot}`}>{slot}</button>
+                          : <span className="slot-dash">-</span>;
+                        return <td key={`theory-${i}`}><div className={`cell ${course ? "filled" : "empty"}${course && cols.includes(i) ? " viol" : ""}`} style={course ? { background: course.color } : undefined}><div className="tags">{slotTag}</div>{course && <><b title={course.title || course.code}>{course.title || course.code}</b><i title={course.faculty}>{course.faculty}</i>{course.venue && <i title={course.venue}>{course.venue}</i>}<span className="cell-code">{course.code} · {course.credits} cr</span></>}</div></td>;
+                      })}
+                    </tr>
+                    <tr className="lab-schedule-row">
+                      <td className="class-type lab-type">LAB</td>
+                      {LB[d].map((slot, i) => {
+                        if (TM[i] === "LUNCH") return <td key={`lab-lunch-${i}`} className="lun lunch-cell"><span>LUNCH</span></td>;
+                        const course = slot !== "-" && slot !== "|" ? tt.courses.find((candidate) => candidate.slots.includes(slot)) : null;
+                        const slotTag = slot !== "-" && slot !== "|"
+                          ? <button type="button" key={slot} className={`tag${!course && parsedSlots.includes(slot) ? " on" : ""}`} disabled={Boolean(course)} onClick={() => toggle(slot)} title={course ? "This time is occupied" : `Use slot ${slot}`}>{slot}</button>
+                          : <span className="slot-dash">-</span>;
+                        return <td key={`lab-${i}`}><div className={`cell ${course ? "filled" : "empty"}${course && cols.includes(i) ? " viol" : ""}`} style={course ? { background: course.color } : undefined}><div className="tags">{slotTag}</div>{course && <><b title={course.title || course.code}>{course.title || course.code}</b><i title={course.faculty}>{course.faculty}</i>{course.venue && <i title={course.venue}>{course.venue}</i>}<span className="cell-code">{course.code} · {course.credits} cr</span></>}</div></td>;
+                      })}
+                    </tr>
+                  </Fragment>
                 ))}
               </tbody>
             </table>

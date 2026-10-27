@@ -704,3 +704,31 @@ html body .collab-modal-backdrop .modal-close { flex: 0 0 36px !important; }
   html body .collab-modal-backdrop,
   html body .collab-modal-backdrop > .collab-modal { animation: none !important; }
 }
+
+
+/* Separate FFCS theory and lab rows with the official start/end times. */
+.timetable-split-view{min-width:1080px;table-layout:fixed}
+.timetable-split-view col.day-col{width:4.5%}
+.timetable-split-view col.class-col{width:5.4%}
+.timetable-split-view col.lunch-col{width:2.8%}
+.timetable-split-view thead th{height:34px;min-height:34px;padding:5px 3px;font-size:11px;font-weight:600;white-space:nowrap;text-align:center;vertical-align:middle;background:#f1eee5;color:#222}
+.timetable-split-view thead .timing-category{font-size:11px;font-weight:800;letter-spacing:.04em;white-space:normal}
+.timetable-split-view thead .theory-time-category{background:#e2d9ff;color:#211a43}
+.timetable-split-view thead .lab-time-category{background:#d9edff;color:#17344c}
+.timetable-split-view thead .timing-label{background:#f4f0e5;color:#353535;font-weight:700}
+.timetable-split-view thead .timing-value{background:#fff;color:#222;font-variant-numeric:tabular-nums}
+.timetable-split-view thead .timing-lunch{background:#fff0bf;color:#363126;font-weight:700}
+.timetable-split-view tbody td{height:88px}
+.timetable-split-view tbody td.day-name{vertical-align:middle;background:#f4f0e5;font-weight:800}
+.timetable-split-view tbody td.class-type{width:auto;text-align:center;vertical-align:middle;font-size:10px;font-weight:800;letter-spacing:.02em;background:#e2d9ff;color:#211a43;white-space:nowrap;padding:4px 2px}
+.timetable-split-view tbody td.lab-type{background:#d9edff;color:#17344c}
+.timetable-split-view .cell{min-height:88px;padding:5px 4px;gap:4px}
+.timetable-split-view .tags{min-height:15px}
+.timetable-split-view .slot-dash{display:inline-block;padding:2px 4px;font-size:10px;line-height:1.35;color:#777}
+.timetable-split-view .lunch-cell{vertical-align:middle;text-align:center;background:#fff0bf;font-size:9px;font-weight:700;letter-spacing:.03em}
+.timetable-split-view .lunch-cell span{writing-mode:vertical-rl;transform:rotate(180deg);display:inline-block}
+.timetable-split-view tbody tr.theory-schedule-row td{border-bottom-color:rgba(21,21,21,.28)}
+.timetable-split-view tbody tr.lab-schedule-row td{border-bottom-color:rgba(21,21,21,.4)}
+.tw{overflow-x:auto}
+@media(max-width:760px){.timetable-split-view{min-width:1080px}.timetable-split-view thead th{font-size:10px}.timetable-split-view tbody td.class-type{font-size:9px}}
+@media print{.timetable-split-view{min-width:0!important}.timetable-split-view thead th{font-size:8px;height:27px}.timetable-split-view tbody td{height:70px}.timetable-split-view .cell{min-height:70px}}
