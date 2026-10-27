@@ -1246,7 +1246,7 @@ function TutorialModal({ open, onClose }) {
           <div className="tutorial-step"><span>4</span><div><b>Paste into FFCS Planner</b><p>Under “Import your own subject faculty list”, enter the subject name and paste the copied table.</p></div></div>
           <div className="tutorial-step"><span>5</span><div><b>Parse and save the subject</b><p>Click “Parse and save subject”. The valid rows become searchable faculty / class options. Select one and enter course credits manually.</p></div></div>
         </div>
-        <div className="tutorial-footer"><span>Tip: use a YouTube Unlisted video. Firebase Storage is not needed for the tutorial.</span><button type="button" className="btn p" onClick={onClose}>Got it</button></div>
+        <div className="tutorial-footer"><button type="button" className="btn p" onClick={onClose}>Got it</button></div>
       </section>
     </div>,
     document.body

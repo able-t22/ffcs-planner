@@ -780,8 +780,7 @@ html body .collab-modal-backdrop .modal-close { flex: 0 0 36px !important; }
 .tutorial-step>div{min-width:0}
 .tutorial-step b{display:block;margin:1px 0 4px;color:#151515;font-size:11px;line-height:1.45}
 .tutorial-step p{margin:0;color:#565656;font-size:10px;line-height:1.55}
-.tutorial-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:15px;padding-top:12px;border-top:1px solid #d9d4c8}
-.tutorial-footer>span{min-width:0;color:#5b5b5b;font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+.tutorial-footer{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-top:15px;padding-top:12px;border-top:1px solid #d9d4c8}
 .tutorial-footer code{color:#292929;font-size:10px;background:#eee9dd;border-radius:4px;padding:2px 4px}
 .tutorial-footer .btn{flex:none}
 @media(max-width:760px){
