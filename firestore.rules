@@ -1,9 +1,55 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // A signed-in user can read or change only their own FFCS planner document.
     match /users/{userId} {
-      // A signed-in user can read or change only their own FFCS planner document.
       allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Collaboration invites: code -> room lookup. Anyone signed in (Google or
+    // anonymous) who knows the 8-character code can read it; only the creator
+    // can write or delete it, and it must name them as owner.
+    match /collabInvites/{code} {
+      allow get: if request.auth != null;
+      allow list: if false;
+      allow create: if request.auth != null
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.roomId is string;
+      allow update: if false;
+      allow delete: if request.auth != null && resource.data.ownerUid == request.auth.uid;
+    }
+
+    // Collaboration rooms: only members can read or edit; a non-member can add
+    // only themselves, and only by presenting a valid invite code for this room.
+    match /collabRooms/{roomId} {
+      allow create: if request.auth != null
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.participantIds == [request.auth.uid];
+
+      allow read: if request.auth != null
+        && request.auth.uid in resource.data.participantIds;
+
+      allow update: if request.auth != null && (
+        // Existing member editing the shared timetable or re-announcing membership.
+        (request.auth.uid in resource.data.participantIds
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['timetable', 'updatedAt', 'participantIds', 'participants', 'joinCode'])
+          && request.auth.uid in request.resource.data.participantIds)
+        ||
+        // New participant joining with a valid invite code that points at this room.
+        (!(request.auth.uid in resource.data.participantIds)
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['participantIds', 'participants', 'joinCode', 'updatedAt'])
+          && request.resource.data.participantIds.hasAll(resource.data.participantIds)
+          && request.resource.data.participantIds.size() == resource.data.participantIds.size() + 1
+          && request.auth.uid in request.resource.data.participantIds
+          && get(/databases/$(database)/documents/collabInvites/$(request.resource.data.joinCode)).data.roomId == roomId)
+      );
+
+      allow delete: if request.auth != null && resource.data.ownerUid == request.auth.uid;
     }
   }
 }

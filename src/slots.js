@@ -28,7 +28,7 @@ export const THEORY_START = ["08:00", "09:00", "10:00", "11:00", "12:00", "-", "
 export const THEORY_END = ["08:50", "09:50", "10:50", "11:50", "12:50", "-", "Lunch", "14:50", "15:50", "16:50", "17:50", "18:50", "19:00", "19:50"];
 export const LAB_START = ["08:00", "08:51", "09:51", "10:41", "11:40", "12:31", "Lunch", "14:00", "14:51", "15:51", "16:41", "17:40", "18:31", "-"];
 export const LAB_END = ["08:50", "09:40", "10:40", "11:30", "12:30", "13:20", "Lunch", "14:50", "15:40", "16:40", "17:30", "18:30", "19:20", "-"];
-export const COL = ["#d98cb3","#e57f7f","#a3cfd9","#c9a38f","#9ea0d6","#a6d68a","#6fcf97","#c4b0e0","#e6c46f","#8fc7b8"];
+export const COL = ["#9CEBDC","#FFB5C3","#D8C9FF","#FFE88E","#DDF6EF","#FFDCCB","#E9DFFF","#FFF0B7","#CDEAFF","#FFCFE0"];
 export const ALL = new Set(
   DAYS.flatMap((d) => [...TH[d], ...LB[d]]).filter((s) => s !== "-" && s !== "|")
 );

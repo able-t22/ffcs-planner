@@ -1,0 +1,208 @@
+TAP version 13
+# Subtest: slot group mapping
+ok 1 - slot group mapping
+  ---
+  duration_ms: 1.476081
+  type: 'test'
+  ...
+# Subtest: theory-first pairs same faculty lab in the right range; wrong faculty ignored
+ok 2 - theory-first pairs same faculty lab in the right range; wrong faculty ignored
+  ---
+  duration_ms: 2.643047
+  type: 'test'
+  ...
+# Subtest: lab-first reverse pairing (late lab -> theory ending in 1; early lab -> theory ending in 2)
+ok 3 - lab-first reverse pairing (late lab -> theory ending in 1; early lab -> theory ending in 2)
+  ---
+  duration_ms: 2.413812
+  type: 'test'
+  ...
+# Subtest: no counterpart -> notice, original only
+ok 4 - no counterpart -> notice, original only
+  ---
+  duration_ms: 0.33892
+  type: 'test'
+  ...
+# Subtest: different faculty / wrong type never pair
+ok 5 - different faculty / wrong type never pair
+  ---
+  duration_ms: 0.283647
+  type: 'test'
+  ...
+# Subtest: counterpart clash keeps original and names the conflicting subject
+ok 6 - counterpart clash keeps original and names the conflicting subject
+  ---
+  duration_ms: 0.679413
+  type: 'test'
+  ...
+# Subtest: multiple distinct counterparts -> no arbitrary pick
+ok 7 - multiple distinct counterparts -> no arbitrary pick
+  ---
+  duration_ms: 0.307232
+  type: 'test'
+  ...
+# Subtest: duplicate copied rows are not ambiguity
+ok 8 - duplicate copied rows are not ambiguity
+  ---
+  duration_ms: 0.733494
+  type: 'test'
+  ...
+# Subtest: toggle off or hand-edited slots -> manual, no pairing, no notice
+ok 9 - toggle off or hand-edited slots -> manual, no pairing, no notice
+  ---
+  duration_ms: 0.291709
+  type: 'test'
+  ...
+# Subtest: paired Add Together components become separate ETH and ELA rows with independent credits
+ok 10 - paired Add Together components become separate ETH and ELA rows with independent credits
+  ---
+  duration_ms: 1.035488
+  type: 'test'
+  ...
+# Subtest: blank component credit contributes zero without rejecting the other component
+ok 11 - blank component credit contributes zero without rejecting the other component
+  ---
+  duration_ms: 0.447784
+  type: 'test'
+  ...
+# Subtest: counts theory and lab rows for the same subject once
+ok 12 - counts theory and lab rows for the same subject once
+  ---
+  duration_ms: 1.113576
+  type: 'test'
+  ...
+# Subtest: uses subject code as canonical identity and title only when code is missing
+ok 13 - uses subject code as canonical identity and title only when code is missing
+  ---
+  duration_ms: 0.171188
+  type: 'test'
+  ...
+# Subtest: does not merge rows that have no subject identity
+ok 14 - does not merge rows that have no subject identity
+  ---
+  duration_ms: 0.195935
+  type: 'test'
+  ...
+# Subtest: faculty identity is deduplicated across theory and lab scoring
+ok 15 - faculty identity is deduplicated across theory and lab scoring
+  ---
+  duration_ms: 4.655185
+  type: 'test'
+  ...
+# Subtest: returns at most three highest-scoring unique recommendations
+ok 16 - returns at most three highest-scoring unique recommendations
+  ---
+  duration_ms: 11.518813
+  type: 'test'
+  ...
+# Subtest: rejects a clash and selects a compatible alternative
+ok 17 - rejects a clash and selects a compatible alternative
+  ---
+  duration_ms: 1.656402
+  type: 'test'
+  ...
+# Subtest: distinguishes an impossible schedule from a search-limit stop
+ok 18 - distinguishes an impossible schedule from a search-limit stop
+  ---
+  duration_ms: 2.023055
+  type: 'test'
+  ...
+# Subtest: honors the no-8-AM rule during candidate preparation
+ok 19 - honors the no-8-AM rule during candidate preparation
+  ---
+  duration_ms: 0.268745
+  type: 'test'
+  ...
+# Subtest: generates clash-free ranked recommendations from the bundled real catalogue
+ok 20 - generates clash-free ranked recommendations from the bundled real catalogue
+  ---
+  duration_ms: 42.11773
+  type: 'test'
+  ...
+# Subtest: handles eight subjects with five faculty choices per subject efficiently
+ok 21 - handles eight subjects with five faculty choices per subject efficiently
+  ---
+  duration_ms: 6.238346
+  type: 'test'
+  ...
+# Subtest: combined and standalone theory slot tokens determine the correct session
+ok 22 - combined and standalone theory slot tokens determine the correct session
+  ---
+  duration_ms: 2.043084
+  type: 'test'
+  ...
+# Subtest: BACSE325 gives Arulkumar V separate morning and afternoon faculty variants with mapped labs
+ok 23 - BACSE325 gives Arulkumar V separate morning and afternoon faculty variants with mapped labs
+  ---
+  duration_ms: 12.943917
+  type: 'test'
+  ...
+# Subtest: recommendation engine honours selected period variants and never cross-pairs faculty
+ok 24 - recommendation engine honours selected period variants and never cross-pairs faculty
+  ---
+  duration_ms: 5.293996
+  type: 'test'
+  ...
+# Subtest: a selected faculty cannot be paired with another faculty's lab
+ok 25 - a selected faculty cannot be paired with another faculty's lab
+  ---
+  duration_ms: 0.293332
+  type: 'test'
+  ...
+# Subtest: faculty search matches names, theory slots, lab slots, venues, and combined terms
+ok 26 - faculty search matches names, theory slots, lab slots, venues, and combined terms
+  ---
+  duration_ms: 2.291498
+  type: 'test'
+  ...
+# Subtest: choosing a different period for the same faculty replaces the old variant instead of sharing its priority
+ok 27 - choosing a different period for the same faculty replaces the old variant instead of sharing its priority
+  ---
+  duration_ms: 2.579061
+  type: 'test'
+  ...
+# Subtest: five-faculty limit is based on distinct people, while period variants replace each other
+ok 28 - five-faculty limit is based on distinct people, while period variants replace each other
+  ---
+  duration_ms: 0.808677
+  type: 'test'
+  ...
+# Subtest: tutorial hub includes the Add Together video
+ok 29 - tutorial hub includes the Add Together video
+  ---
+  duration_ms: 0.960425
+  type: 'test'
+  ...
+# Subtest: tutorial hub includes the recommendation video
+ok 30 - tutorial hub includes the recommendation video
+  ---
+  duration_ms: 0.166881
+  type: 'test'
+  ...
+# Subtest: the existing VTOP import tutorial remains part of the full onboarding
+ok 31 - the existing VTOP import tutorial remains part of the full onboarding
+  ---
+  duration_ms: 0.136525
+  type: 'test'
+  ...
+# Subtest: returning Google accounts see the two-feature welcome; new accounts see all three
+ok 32 - returning Google accounts see the two-feature welcome; new accounts see all three
+  ---
+  duration_ms: 0.293692
+  type: 'test'
+  ...
+# Subtest: the Tutorial button can always reopen the full three-video hub
+ok 33 - the Tutorial button can always reopen the full three-video hub
+  ---
+  duration_ms: 0.200552
+  type: 'test'
+  ...
+1..33
+# tests 33
+# suites 0
+# pass 33
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 167.630401

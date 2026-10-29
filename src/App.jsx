@@ -2,6 +2,10 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { DAYS, TH, LB, TM, THEORY_START, THEORY_END, LAB_START, LAB_END, COL, ALL, parseSlots, ruleCols, ruleHits, clashes } from "./slots";
 import courseCatalog from "./courseCatalog.json";
+import { generateRecommendations } from "./recommendationEngine.js";
+import { buildRecommendationVariants, filterRecommendationVariants, toggleRecommendationVariantPreference } from "./recommendationOptions.js";
+import { countUniqueSubjects } from "./courseUtils.js";
+import { resolvePairing, intervalClashes, offeringKind, buildComponentCourseRow, buildPairedComponentRows } from "./addTogether.js";
 import { onAuthStateChanged, GoogleAuthProvider, signInAnonymously, signInWithPopup, signOut as firebaseSignOut } from "firebase/auth";
 import { arrayUnion, collection, deleteDoc, doc, getDoc, onSnapshot, runTransaction, serverTimestamp, setDoc, updateDoc, writeBatch } from "firebase/firestore";
 import { auth, db, FIREBASE_CONFIGURED } from "./firebase";
@@ -9,7 +13,11 @@ import { auth, db, FIREBASE_CONFIGURED } from "./firebase";
 const KEY = "ffcs-v1";
 const COLLAB_KEY = "ffcs-collab-room-v1";
 const TUTORIAL_GUEST_SEEN_KEY = "ffcs-tutorial-seen-local-v1";
+const FEATURE_WELCOME_GUEST_VERSION_KEY = "ffcs-feature-welcome-version-v1";
+const FEATURE_WELCOME_VERSION = "2026-10-three-tutorials-v1";
 const TUTORIAL_YOUTUBE_URL = (import.meta.env.VITE_TUTORIAL_YOUTUBE_URL || "https://youtu.be/0gD5SaLifac").trim();
+const ADD_TOGETHER_YOUTUBE_URL = "https://youtu.be/qQgwxxN7eos";
+const RECOMMENDATION_YOUTUBE_URL = "https://youtu.be/OQwfCLtp-Rc";
 
 function getYouTubeEmbedUrl(rawUrl) {
   if (!rawUrl) return "";
@@ -35,6 +43,8 @@ function getYouTubeEmbedUrl(rawUrl) {
 }
 
 const TUTORIAL_YOUTUBE_EMBED_URL = getYouTubeEmbedUrl(TUTORIAL_YOUTUBE_URL);
+const ADD_TOGETHER_YOUTUBE_EMBED_URL = getYouTubeEmbedUrl(ADD_TOGETHER_YOUTUBE_URL);
+const RECOMMENDATION_YOUTUBE_EMBED_URL = getYouTubeEmbedUrl(RECOMMENDATION_YOUTUBE_URL);
 const uid = () => Math.random().toString(36).slice(2, 9);
 const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } };
 
@@ -75,40 +85,78 @@ function App() {
   const [collabError, setCollabError] = useState("");
   const [authRevision, setAuthRevision] = useState(0);
   const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [tutorialMode, setTutorialMode] = useState("all");
+  // A cached local profile means this visitor has used the planner before. New
+  // local profiles get all three guides; returning profiles get only the update.
+  const [hadLocalAccountAtStartup] = useState(Boolean(cached.user));
 
-  const openTutorial = useCallback(() => setTutorialOpen(true), []);
+  const openTutorial = useCallback(() => {
+    setTutorialMode("all");
+    setTutorialOpen(true);
+  }, []);
   const closeTutorial = useCallback(async () => {
     setTutorialOpen(false);
     const uidForTutorial = session?.uid;
     if (uidForTutorial && db) {
-      // Store the dismissal on this account, not in a browser-wide flag.
+      // Persist the feature-welcome version on this account so the welcome is
+      // shown once per Google account, even when the user changes browsers.
       try {
         await setDoc(doc(db, "users", uidForTutorial), {
           ownerUid: uidForTutorial,
           tutorialSeen: true,
           tutorialSeenAt: serverTimestamp(),
+          featureWelcomeVersion: FEATURE_WELCOME_VERSION,
+          featureWelcomeSeenAt: serverTimestamp(),
         }, { merge: true });
       } catch (error) {
         console.warn("Could not save tutorial dismissal for this account:", error);
       }
     } else {
-      try { localStorage.setItem(TUTORIAL_GUEST_SEEN_KEY, "true"); } catch { /* Tutorial still closes for this session. */ }
+      try {
+        localStorage.setItem(TUTORIAL_GUEST_SEEN_KEY, "true");
+        localStorage.setItem(FEATURE_WELCOME_GUEST_VERSION_KEY, FEATURE_WELCOME_VERSION);
+      } catch { /* Tutorial still closes for this session. */ }
     }
   }, [session?.uid]);
 
   const handleLocalLogin = (profile) => setUser(profile);
+  const saveRecommendedTimetable = (draft) => {
+    const id = uid();
+    const baseName = draft.name || "Recommended Timetable";
+    let name = baseName;
+    let suffix = 2;
+    while (tts.some((item) => item.name === name)) {
+      name = `${baseName} (${suffix})`;
+      suffix += 1;
+    }
+    const newTimetable = {
+      id,
+      name,
+      courses: (draft.courses || []).map((course) => ({ ...course, id: uid() })),
+      rules: { ...(draft.rules || {}) },
+    };
+    setTts((items) => [...items, newTimetable]);
+    setCur(id);
+  };
 
-  // Local/guest users get the introduction once per browser. Google accounts
-  // use the tutorialSeen field in their own Firestore document instead.
+  // Local/guest users get a one-time feature welcome per browser. Returning
+  // local profiles see the two new features; first-time profiles see all three.
   useEffect(() => {
     if (!authInitialized || session || !user) return;
     if (new URLSearchParams(window.location.search).has("room")) return;
     try {
-      if (localStorage.getItem(TUTORIAL_GUEST_SEEN_KEY) !== "true") setTutorialOpen(true);
+      if (localStorage.getItem(FEATURE_WELCOME_GUEST_VERSION_KEY) !== FEATURE_WELCOME_VERSION) {
+        setTutorialMode(hadLocalAccountAtStartup ? "updates" : "all");
+        setTutorialOpen(true);
+        // Mark it as presented immediately, preventing repeated welcome popups
+        // if the page is refreshed while the dialog is open.
+        localStorage.setItem(FEATURE_WELCOME_GUEST_VERSION_KEY, FEATURE_WELCOME_VERSION);
+      }
     } catch {
+      setTutorialMode(hadLocalAccountAtStartup ? "updates" : "all");
       setTutorialOpen(true);
     }
-  }, [authInitialized, session?.uid, user?.email, user?.n]);
+  }, [authInitialized, session?.uid, user?.email, user?.n, hadLocalAccountAtStartup]);
 
   // Firebase restores a signed-in Google account automatically on page reload.
   useEffect(() => {
@@ -213,9 +261,25 @@ function App() {
           setHiddenCatalogCodes(selectedHiddenCatalogCodes);
           setDataReady(true);
           setCloudStatus("Account connected");
-          // Every signed-in account is shown the tutorial once, whether it is a
-          // new account or an older account that has not dismissed this tutorial.
-          setTutorialOpen(saved?.tutorialSeen !== true && !new URLSearchParams(window.location.search).has("room"));
+          // Existing Firestore profiles get a one-time welcome for the newly
+          // added features. A brand-new profile gets the full three-part guide.
+          const shouldShowFeatureWelcome = saved?.featureWelcomeVersion !== FEATURE_WELCOME_VERSION
+            && !new URLSearchParams(window.location.search).has("room");
+          if (shouldShowFeatureWelcome) {
+            setTutorialMode(record.exists() ? "updates" : "all");
+            setTutorialOpen(true);
+            // Save the version as soon as it is presented to avoid re-showing it
+            // on reload. Dismissal also saves it via closeTutorial.
+            setDoc(doc(db, "users", session.uid), {
+              ownerUid: session.uid,
+              featureWelcomeVersion: FEATURE_WELCOME_VERSION,
+              featureWelcomeShownAt: serverTimestamp(),
+            }, { merge: true }).catch((error) => {
+              console.warn("Could not record feature welcome version:", error);
+            });
+          } else {
+            setTutorialOpen(false);
+          }
         }
       } catch (error) {
         if (alive) {
@@ -526,7 +590,10 @@ function App() {
     setAccountReviewError("");
     setDataReady(true);
     setCloudStatus("Verifying account ownership…");
-    setTutorialOpen(saved?.tutorialSeen !== true && !new URLSearchParams(window.location.search).has("room"));
+    if (saved?.featureWelcomeVersion !== FEATURE_WELCOME_VERSION && !new URLSearchParams(window.location.search).has("room")) {
+      setTutorialMode("updates");
+      setTutorialOpen(true);
+    }
   };
 
   const startFreshAccountData = async () => {
@@ -543,7 +610,10 @@ function App() {
       setAccountDataReview(null);
       setDataReady(true);
       setCloudStatus("Starting a private planner…");
-      setTutorialOpen(!new URLSearchParams(window.location.search).has("room"));
+      if (!new URLSearchParams(window.location.search).has("room")) {
+        setTutorialMode("all");
+        setTutorialOpen(true);
+      }
     } catch (error) {
       setAccountReviewError(error.message || "Could not reset this account's saved planner. Check the Firestore security rules.");
     } finally {
@@ -662,14 +732,15 @@ function App() {
       create={() => { const t = { id: uid(), name: "Timetable " + (tts.length + 1), courses: [] }; setTts([...tts, t]); setCur(t.id); }}
       remove={(id) => window.confirm("Delete this timetable?") && setTts(tts.filter((t) => t.id !== id))}
       cloudMode={Boolean(session)} cloudStatus={cloudStatus} onGoogleLogin={handleGoogleLogin}
-      openTutorial={openTutorial} tutorialOpen={tutorialOpen} closeTutorial={closeTutorial}
+      openTutorial={openTutorial} tutorialOpen={tutorialOpen} tutorialMode={tutorialMode} closeTutorial={closeTutorial}
       {...collaborationProps} />;
   }
   return <Planner tt={tt} user={user} back={() => { if (activeCollab) leaveCollaborationRoom(); else setCur(null); }} logout={logout}
     update={activeCollab ? updateCollaborationTimetable : (fn) => setTts((items) => items.map((t) => t.id === tt.id ? fn(t) : t))}
     customCatalog={customCatalog} onCustomCatalogChange={setCustomCatalog} hiddenCatalogCodes={hiddenCatalogCodes}
     onHiddenCatalogCodesChange={setHiddenCatalogCodes} cloudMode={Boolean(session)} cloudStatus={cloudStatus} onGoogleLogin={handleGoogleLogin}
-    openTutorial={openTutorial} tutorialOpen={tutorialOpen} closeTutorial={closeTutorial}
+    openTutorial={openTutorial} tutorialOpen={tutorialOpen} tutorialMode={tutorialMode} closeTutorial={closeTutorial}
+    onSaveRecommendedTimetable={saveRecommendedTimetable}
     {...collaborationProps} />;
 }
 
@@ -737,7 +808,7 @@ function AppHeader({ user, logout, cloudMode, cloudStatus, children, onGoogleLog
       {children}
       <span className="header-spacer" />
       {cloudMode && <span className="cloud-indicator" title={cloudStatus}><span className={cloudStatus === "All changes saved" ? "cloud-dot saved" : "cloud-dot"} />{cloudStatus || "Cloud account"}</span>}
-      {onTutorialClick && <button className="btn s ghost-btn tutorial-trigger" type="button" onClick={onTutorialClick} title="Watch the custom course and faculty import tutorial"><span aria-hidden="true">▶</span> Tutorial</button>}
+      {onTutorialClick && <button className="btn s ghost-btn tutorial-trigger" type="button" onClick={onTutorialClick} title="Watch all three FFCS Planner tutorials"><span aria-hidden="true">▶</span> Tutorial</button>}
       {!cloudMode && onGoogleLogin && <button className="btn s google-connect-btn" onClick={onGoogleLogin}>↗ Connect Google</button>}
       <div className="profile-chip"><span className="avatar">{(user.n || user.email || "S").slice(0, 1).toUpperCase()}</span><span className="profile-text"><b>{user.n || "Student"}</b><small>{user.email || user.r || "Local account"}</small></span></div>
       <button className="btn s ghost-btn" onClick={logout}>Sign out</button>
@@ -745,8 +816,8 @@ function AppHeader({ user, logout, cloudMode, cloudStatus, children, onGoogleLog
   );
 }
 
-function Dashboard({ user, tts, logout, open, create, remove, cloudMode, cloudStatus, onGoogleLogin, activeCollab, collabOpen, pendingRoomId, collabBusy, collabError, openCollab, closeCollab, createCollab, joinCollab, leaveCollab, clearCollabError, firebaseConfigured, openTutorial, tutorialOpen, closeTutorial }) {
-  const totalCourses = tts.reduce((sum, t) => sum + t.courses.length, 0);
+function Dashboard({ user, tts, logout, open, create, remove, cloudMode, cloudStatus, onGoogleLogin, activeCollab, collabOpen, pendingRoomId, collabBusy, collabError, openCollab, closeCollab, createCollab, joinCollab, leaveCollab, clearCollabError, firebaseConfigured, openTutorial, tutorialOpen, tutorialMode, closeTutorial }) {
+  const totalCourses = tts.reduce((sum, t) => sum + countUniqueSubjects(t.courses), 0);
   const totalCredits = tts.reduce((sum, t) => sum + t.courses.reduce((a, c) => a + c.credits, 0), 0);
   return (
     <>
@@ -755,7 +826,7 @@ function Dashboard({ user, tts, logout, open, create, remove, cloudMode, cloudSt
         <div className="dashboard-hero"><div><div className="eyebrow">FFCS PLANNER</div><h1>Let’s plan your semester{user.n ? `, ${user.n.split(" ")[0]}` : ""}.</h1><p className="mut">Keep your courses, slots and credits together.</p></div><div className="dashboard-hero-actions"><button className="btn s ghost-btn" onClick={openCollab}>↗ Join a room</button><button className="btn p create-btn" onClick={create}>＋ Create timetable</button></div></div>
         <div className="stats-row">
           <div className="stat-card"><span className="stat-label">TIMETABLES</span><b>{tts.length.toString().padStart(2, "0")}</b><small>semester plans</small></div>
-          <div className="stat-card"><span className="stat-label">COURSES ADDED</span><b>{totalCourses.toString().padStart(2, "0")}</b><small>across all timetables</small></div>
+          <div className="stat-card"><span className="stat-label">SUBJECTS ADDED</span><b>{totalCourses.toString().padStart(2, "0")}</b><small>across all timetables</small></div>
           <div className="stat-card"><span className="stat-label">TOTAL CREDITS</span><b>{totalCredits}</b><small>planned credits</small></div>
         </div>
         <div className="section-heading"><div><h2>Your semester plans</h2><p className="mut">Open a plan to add courses, check clashes or update slots.</p></div><span className="section-count">{tts.length} {tts.length === 1 ? "plan" : "plans"}</span></div>
@@ -764,19 +835,19 @@ function Dashboard({ user, tts, logout, open, create, remove, cloudMode, cloudSt
           {tts.map((t, index) => (
             <div key={t.id} className="timetable-card" onClick={() => open(t.id)} role="button" tabIndex={0} onKeyDown={(ev) => { if (ev.key === "Enter") open(t.id); }}>
               <div className="timetable-card-top"><span className={`timetable-symbol symbol-${index % 4}`}>▦</span><button className="icon-button delete-button" title="Delete timetable" onClick={(ev) => { ev.stopPropagation(); remove(t.id); }}>✕</button></div>
-              <h3>{t.name}</h3><p className="mut">{t.courses.length} courses · {t.courses.reduce((x, c) => x + c.credits, 0)} credits</p>
-              <div className="card-footer"><span>{t.courses.length ? `${t.courses.length} courses planned` : "Ready to set up"}</span><span className="arrow-circle">↗</span></div>
+              <h3>{t.name}</h3><p className="mut">{countUniqueSubjects(t.courses)} {countUniqueSubjects(t.courses) === 1 ? "subject" : "subjects"} · {t.courses.reduce((x, c) => x + c.credits, 0)} credits</p>
+              <div className="card-footer"><span>{t.courses.length ? `${countUniqueSubjects(t.courses)} ${countUniqueSubjects(t.courses) === 1 ? "subject" : "subjects"} planned` : "Ready to set up"}</span><span className="arrow-circle">↗</span></div>
             </div>
           ))}
         </div>
       </div>
       <CollaborateModal open={collabOpen} pendingRoomId={pendingRoomId} canCreate={false} busy={collabBusy} error={collabError} firebaseConfigured={firebaseConfigured} onClose={closeCollab} onCreate={createCollab} onJoin={joinCollab} onClearError={clearCollabError} />
-      <TutorialModal open={tutorialOpen} onClose={closeTutorial} />
+      <TutorialModal open={tutorialOpen} mode={tutorialMode} onClose={closeTutorial} />
     </>
   );
 }
 
-const blank = { code: "", title: "", credits: "", faculty: "", venue: "" };
+const blank = { code: "", title: "", credits: "", ethCredits: "", elaCredits: "", faculty: "", venue: "" };
 
 function SearchableSelect({ label, options, value, onChange, placeholder, searchPlaceholder, disabled = false, emptyMessage = "No matching options found." }) {
   const [open, setOpen] = useState(false);
@@ -856,11 +927,401 @@ function SearchableSelect({ label, options, value, onChange, placeholder, search
   );
 }
 
-function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalogChange, hiddenCatalogCodes, onHiddenCatalogCodesChange, cloudMode, cloudStatus, onGoogleLogin, activeCollab, collabOpen, pendingRoomId, collabBusy, collabError, openCollab, closeCollab, createCollab, joinCollab, leaveCollab, clearCollabError, firebaseConfigured, openTutorial, tutorialOpen, closeTutorial }) {
+function facultyOptionsForSubject(subject) {
+  return buildRecommendationVariants(subject);
+}
+
+function RecommendedScheduleGrid({ courses }) {
+  const courseForSlot = (slot) => slot && slot !== "-" && slot !== "|" ? courses.find((course) => course.slots.includes(slot)) : null;
+  const renderSlotCell = (slot, index, kind) => {
+    if (TM[index] === "LUNCH") return <td key={`${kind}-lunch-${index}`} className="lun lunch-cell"><span>LUNCH</span></td>;
+    const course = courseForSlot(slot);
+    if (slot === "-" || slot === "|") return <td key={`${kind}-${index}`}><div className="cell empty"><span className="slot-dash">-</span></div></td>;
+    const faculty = course?.slotFaculties?.[slot] || course?.faculty;
+    const venue = course?.slotVenues?.[slot] || course?.venue;
+    return <td key={`${kind}-${index}`}><div className={`cell ${course ? "filled" : "empty"}`} style={course ? { background: course.color } : undefined}>
+      <div className="tags"><span className={`tag${course ? " on" : ""}`}>{slot}</span></div>
+      {course && <><b title={course.title || course.code}>{course.title || course.code}</b><i title={faculty}>{faculty}</i>{venue && <i title={venue}>{venue}</i>}<span className="cell-code">{course.code} · {course.credits} cr</span></>}
+    </div></td>;
+  };
+  return <div className="tw recommend-grid-wrap"><table className="timetable timetable-split-view recommendation-grid-table">
+    <colgroup><col className="day-col" /><col className="class-col" />{TM.map((time, index) => <col key={`${time}-${index}`} className={time === "LUNCH" ? "lunch-col" : "time-col"} />)}</colgroup>
+    <thead>
+      <tr className="timing-row theory-timing-row"><th className="timing-category theory-time-category" rowSpan={2}>THEORY</th><th className="timing-label">Start</th>{THEORY_START.map((time, index) => <th key={`rst-${index}`} className={TM[index] === "LUNCH" ? "lun timing-lunch" : "timing-value"}>{time}</th>)}</tr>
+      <tr className="timing-row theory-timing-row"><th className="timing-label">End</th>{THEORY_END.map((time, index) => <th key={`ret-${index}`} className={TM[index] === "LUNCH" ? "lun timing-lunch" : "timing-value"}>{time}</th>)}</tr>
+      <tr className="timing-row lab-timing-row"><th className="timing-category lab-time-category" rowSpan={2}>LAB</th><th className="timing-label">Start</th>{LAB_START.map((time, index) => <th key={`rls-${index}`} className={TM[index] === "LUNCH" ? "lun timing-lunch" : "timing-value"}>{time}</th>)}</tr>
+      <tr className="timing-row lab-timing-row"><th className="timing-label">End</th>{LAB_END.map((time, index) => <th key={`rle-${index}`} className={TM[index] === "LUNCH" ? "lun timing-lunch" : "timing-value"}>{time}</th>)}</tr>
+    </thead>
+    <tbody>{DAYS.map((day) => <Fragment key={day}>
+      <tr className="theory-schedule-row"><td className="day-name" rowSpan={2}>{day}</td><td className="class-type theory-type">THEORY</td>{TH[day].map((slot, index) => renderSlotCell(slot, index, "theory"))}</tr>
+      <tr className="lab-schedule-row"><td className="class-type lab-type">LAB</td>{LB[day].map((slot, index) => renderSlotCell(slot, index, "lab"))}</tr>
+    </Fragment>)}</tbody>
+  </table></div>;
+}
+
+function RecommendationPreviewModal({ open, subjectName, courses, onClose }) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, onClose]);
+
+  if (!open || typeof document === "undefined") return null;
+  return createPortal(
+    <div className="weekly-preview-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="weekly-preview-modal" role="dialog" aria-modal="true" aria-labelledby="weekly-preview-title">
+        <header className="weekly-preview-header">
+          <div><span className="eyebrow">FULL-WEEK SCHEDULE</span><h2 id="weekly-preview-title">Weekly timetable preview</h2><p>{subjectName || "Recommended timetable"} · Complete theory and lab week</p></div>
+          <button type="button" className="icon-button weekly-preview-close" onClick={onClose} aria-label="Close weekly timetable preview" title="Close preview">×</button>
+        </header>
+        <div className="weekly-preview-body">
+          <RecommendedScheduleGrid courses={courses || []} />
+          <p className="recommend-grid-footnote">The complete weekly grid is shown here using the project's official theory and lab timings. No time clashes were detected in this recommendation.</p>
+        </div>
+        <footer className="weekly-preview-footer"><span>Scroll within this window to inspect the complete timetable.</span><button type="button" className="btn p" onClick={onClose}>Close preview</button></footer>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
+function componentCreditKind(course) {
+  const type = String(course?.componentType || course?.type || course?.courseType || "").trim().toUpperCase();
+  if (["ELA", "LA", "LAB"].includes(type) || type.includes("LAB")) return "ela";
+  if (["ETH", "TH", "THEORY"].includes(type) || type.includes("THEORY")) return "eth";
+  const selected = Array.isArray(course?.selectedOfferings) ? course.selectedOfferings : [];
+  if (selected.length === 1) {
+    const selectedType = String(selected[0]?.type || "").trim().toUpperCase();
+    if (["ELA", "LA", "LAB"].includes(selectedType) || selectedType.includes("LAB")) return "ela";
+    if (["ETH", "TH", "THEORY"].includes(selectedType) || selectedType.includes("THEORY")) return "eth";
+  }
+  const slots = Array.isArray(course?.slots) ? course.slots : [];
+  if (slots.length && slots.every((slot) => /^L\d+$/i.test(String(slot)))) return "ela";
+  if (slots.length && slots.every((slot) => !/^L\d+$/i.test(String(slot)))) return "eth";
+  return "";
+}
+
+function RecommendedWorkspace({ availableCatalog, currentTimetable, rules, canSave, onBack, onSave }) {
+  const [subjectQuery, setSubjectQuery] = useState("");
+  const [facultySearchQuery, setFacultySearchQuery] = useState("");
+  const [selectedCodes, setSelectedCodes] = useState([]);
+  const [activePreferenceCode, setActivePreferenceCode] = useState("");
+  const [preferencesByCode, setPreferencesByCode] = useState({});
+  const [creditsByCode, setCreditsByCode] = useState({});
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generation, setGeneration] = useState(null);
+  const [message, setMessage] = useState("");
+  const [messageType, setMessageType] = useState("warning");
+  const [previewedSignature, setPreviewedSignature] = useState("");
+  const [savingSignature, setSavingSignature] = useState("");
+  const selectedSubjects = selectedCodes.map((code) => availableCatalog.find((subject) => subject.code === code)).filter(Boolean);
+  const activeSubject = selectedSubjects.find((subject) => subject.code === activePreferenceCode) || selectedSubjects[0] || null;
+  const filteredSubjects = availableCatalog.filter((subject) => `${subject.code} ${subject.title}`.toLocaleLowerCase().includes(subjectQuery.trim().toLocaleLowerCase())).slice(0, 20);
+
+  const invalidateResults = () => {
+    setGeneration(null);
+    setMessage("");
+    setPreviewedSignature("");
+  };
+
+  const initialCreditsForSubject = (subject) => {
+    const existingRows = (currentTimetable.courses || []).filter((course) => course.code === subject.code);
+    const ethRow = existingRows.find((course) => componentCreditKind(course) === "eth");
+    const elaRow = existingRows.find((course) => componentCreditKind(course) === "ela");
+    return {
+      eth: ethRow?.credits === undefined || ethRow?.credits === null ? "" : String(ethRow.credits),
+      ela: elaRow?.credits === undefined || elaRow?.credits === null ? "" : String(elaRow.credits),
+    };
+  };
+
+  const toggleSubject = (subject) => {
+    invalidateResults();
+    if (selectedCodes.includes(subject.code)) {
+      setSelectedCodes((existing) => existing.filter((code) => code !== subject.code));
+      if (activePreferenceCode === subject.code) {
+        const nextActive = selectedCodes.find((code) => code !== subject.code);
+        setActivePreferenceCode(nextActive || "");
+        setFacultySearchQuery("");
+      }
+      return;
+    }
+    setSelectedCodes((existing) => [...existing, subject.code]);
+    setActivePreferenceCode(subject.code);
+    setFacultySearchQuery("");
+    setPreferencesByCode((old) => ({ ...old, [subject.code]: old[subject.code] || [] }));
+    setCreditsByCode((old) => Object.prototype.hasOwnProperty.call(old, subject.code)
+      ? old
+      : { ...old, [subject.code]: initialCreditsForSubject(subject) });
+  };
+
+  const viewSubject = (subject) => {
+    if (!selectedCodes.includes(subject.code)) {
+      toggleSubject(subject);
+      return;
+    }
+    setActivePreferenceCode(subject.code);
+    setFacultySearchQuery("");
+  };
+
+  const toggleFaculty = (subject, facultyOption) => {
+    invalidateResults();
+    const current = preferencesByCode[subject.code] || [];
+    const result = toggleRecommendationVariantPreference(current, facultyOption, 5);
+    if (result.limitReached) {
+      setMessage(`Choose no more than five distinct faculties for ${subject.title}. A faculty's morning and afternoon offerings are alternatives; selecting another period replaces that person's current period selection.`);
+      setMessageType("warning");
+      return;
+    }
+    setPreferencesByCode((old) => ({ ...old, [subject.code]: result.preferences }));
+  };
+
+  const changeFacultyRank = (subjectCode, variantId, value) => {
+    invalidateResults();
+    const nextRank = Number(value);
+    setPreferencesByCode((old) => {
+      const list = old[subjectCode] || [];
+      const selected = list.find((item) => (item.variantId || item.key) === variantId);
+      if (!selected) return old;
+      const previousRank = selected.rank;
+      const next = list.map((item) => (item.variantId || item.key) === variantId ? { ...item, rank: nextRank } : item.rank === nextRank ? { ...item, rank: previousRank } : item);
+      return { ...old, [subjectCode]: next.sort((a, b) => a.rank - b.rank) };
+    });
+  };
+
+  const generate = async () => {
+    setMessage("");
+    setGeneration(null);
+    setPreviewedSignature("");
+    if (!selectedSubjects.length) {
+      setMessage("Select at least one subject to generate recommendations.");
+      setMessageType("warning");
+      return;
+    }
+    const missingPrefs = selectedSubjects.filter((subject) => !(preferencesByCode[subject.code] || []).length);
+    if (missingPrefs.length) {
+      setMessage(`Choose at least one faculty/period option for: ${missingPrefs.map((subject) => `${subject.code} — ${subject.title}`).join(", ")}.`);
+      setMessageType("warning");
+      return;
+    }
+    const noVariantsSelected = selectedSubjects.filter((subject) => (preferencesByCode[subject.code] || []).every((item) => !Array.isArray(item.variantIds) || item.variantIds.length === 0));
+    if (noVariantsSelected.length) {
+      setMessage(`Choose a morning/afternoon offering for: ${noVariantsSelected.map((subject) => subject.code).join(", ")}.`);
+      setMessageType("warning");
+      return;
+    }
+    setIsGenerating(true);
+    await new Promise((resolve) => window.setTimeout(resolve, 40));
+    try {
+      const result = generateRecommendations({
+        selectedSubjects,
+        preferencesByCode,
+        rules: rules || {},
+        limit: 3,
+        maxNodes: 120000,
+        maxMs: 2500,
+        maxCandidatesPerSubject: 30000,
+      });
+      setGeneration(result);
+      if (!result.results?.length) {
+        setMessage((result.errors || [result.error || "No recommendation could be generated."]).join(" "));
+        setMessageType(result.status === "limit" ? "warning" : "error");
+      } else if (result.status === "limit") {
+        setMessage(result.error || "Search limit reached. Showing the best valid results found so far.");
+        setMessageType("warning");
+      } else if (result.status === "no-solution") {
+        setMessage(result.error);
+        setMessageType("error");
+      }
+    } catch (error) {
+      setMessage(`The recommendation engine encountered an error: ${error?.message || "Unexpected error"}. Your existing timetable has not been changed.`);
+      setMessageType("error");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const toPreviewCourses = (result) => result.courses.map((course, index) => {
+    const creditValues = creditsByCode[course.subjectCode] || {};
+    return {
+      code: course.subjectCode,
+      title: course.subjectTitle,
+      credits: Number(creditValues.eth || 0) + Number(creditValues.ela || 0),
+      slots: course.slots,
+      faculty: course.faculty,
+      venue: course.venue,
+      slotVenues: course.slotVenues,
+      slotFaculties: course.slotFaculties,
+      color: COL[index % COL.length],
+    };
+  });
+
+  const applyRecommendation = (result) => {
+    setMessage("");
+    if (!canSave) {
+      setMessage("You are currently editing a shared collaboration room. Leave the room first to save a recommendation as a separate private timetable.");
+      setMessageType("warning");
+      return;
+    }
+    const invalidCredits = selectedSubjects.flatMap((subject) => {
+      const credits = creditsByCode[subject.code] || {};
+      return [
+        { component: "ETH", value: credits.eth },
+        { component: "ELA", value: credits.ela },
+      ].filter(({ value }) => String(value ?? "").trim() !== "" && (!Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 50))
+        .map(({ component }) => `${subject.code} ${component}`);
+    });
+    if (invalidCredits.length) {
+      setMessage(`Use a credit value from 0 to 50, or leave the component blank: ${invalidCredits.join(", ")}.`);
+      setMessageType("warning");
+      return;
+    }
+    setSavingSignature(result.signature);
+    try {
+      const courses = [];
+      result.courses.forEach((course, index) => {
+        const credits = creditsByCode[course.subjectCode] || {};
+        const color = COL[index % COL.length];
+        for (const offering of course.selectedOfferings || []) {
+          const component = offering.group === "LAB" ? "ela" : "eth";
+          const creditInput = String(credits[component] ?? "").trim();
+          const slots = [...offering.slots];
+          courses.push({
+            code: course.subjectCode,
+            title: course.subjectTitle,
+            type: offering.type,
+            componentType: offering.type,
+            credits: creditInput === "" ? 0 : Number(creditInput),
+            slots,
+            faculty: offering.faculty,
+            venue: offering.venue,
+            slotVenues: Object.fromEntries(slots.map((slot) => [slot, offering.venue])),
+            slotFaculties: Object.fromEntries(slots.map((slot) => [slot, offering.faculty])),
+            color,
+            selectedOfferings: [{ type: offering.type, faculty: offering.faculty, rank: offering.rank, slotDetail: offering.slotDetail, venue: offering.venue, slots }],
+          });
+        }
+      });
+      onSave({ name: `Recommended Timetable ${new Date().toLocaleDateString("en-IN")}`, courses, rules: { ...(rules || {}) } });
+      setSavingSignature("");
+    } catch (error) {
+      setMessage(`Could not save this recommendation: ${error?.message || "Unexpected error"}. The existing timetable has not been changed.`);
+      setMessageType("error");
+      setSavingSignature("");
+    }
+  };
+
+  const closePreview = useCallback(() => setPreviewedSignature(""), []);
+  const previewResult = generation?.results?.find((result) => result.signature === previewedSignature) || null;
+  const previewCourses = previewResult ? toPreviewCourses(previewResult) : [];
+  const activePreferences = activeSubject ? [...(preferencesByCode[activeSubject.code] || [])].sort((a, b) => a.rank - b.rank) : [];
+  const activeFacultyOptions = activeSubject ? facultyOptionsForSubject(activeSubject) : [];
+  const filteredFacultyOptions = filterRecommendationVariants(activeFacultyOptions, facultySearchQuery);
+
+  return <section className="recommended-workspace">
+    <div className="recommended-hero card">
+      <div className="recommended-hero-copy"><span className="eyebrow">CONSTRAINT-BASED PLANNING</span><h2>Recommended timetables</h2><p className="mut">Choose subjects, rank up to five distinct faculties per subject, and search for the three best clash-free combinations. Each faculty is shown as separate morning/afternoon options with its mapped lab.</p><div className="recommend-rule-pills">{rules?.no8 && <span className="pill">No 8 AM classes</span>}{rules?.noNight && <span className="pill">No night classes</span>}{!rules?.no8 && !rules?.noNight && <span className="pill">Current timetable rules: none enabled</span>}</div></div>
+      <button type="button" className="btn s ghost-btn" onClick={onBack}>← Back to timetable</button>
+    </div>
+
+    <div className="recommended-setup-grid">
+      <section className="card recommend-subject-picker"><div className="recommend-section-heading"><div><span className="eyebrow">STEP 1</span><h3>Select subjects</h3></div><span className="pill">{selectedSubjects.length} selected</span></div>
+        <label className="recommend-search-label">Search your subject catalogue<input type="search" value={subjectQuery} disabled={isGenerating} onChange={(event) => setSubjectQuery(event.target.value)} placeholder="Search course code or name…" /></label>
+        <div className="recommend-search-results" role="list" aria-label="Available subjects">
+          {filteredSubjects.length ? filteredSubjects.map((subject) => {
+            const selected = selectedCodes.includes(subject.code);
+            const isViewing = activeSubject?.code === subject.code;
+            return <div key={subject.code} className={`recommend-subject-option-row${selected ? " selected" : ""}${isViewing ? " viewing" : ""}`}>
+              <button type="button" className={`recommend-subject-option${selected ? " selected" : ""}`} aria-pressed={selected} disabled={isGenerating} onClick={() => toggleSubject(subject)}><span className="recommend-check" aria-hidden="true">{selected ? "✓" : "+"}</span><span><b>{subject.code}</b><small>{subject.title}</small></span></button>
+              <button type="button" className={`recommend-subject-view${isViewing ? " active" : ""}`} disabled={isGenerating} onClick={() => viewSubject(subject)}>{isViewing ? "Viewing" : "View"}</button>
+            </div>;
+          }) : <p className="recommend-empty-note">No subjects match your search.</p>}
+          {filteredSubjects.length === 20 && <p className="recommend-list-note">Showing the first 20 matches. Refine your search to find other subjects.</p>}
+        </div>
+        <p className="recommend-help">Only subjects already in your catalogue or personal imported list are shown. The engine will not invent a course or slot.</p>
+      </section>
+
+      <section className="card recommend-preference-panel"><div className="recommend-section-heading"><div><span className="eyebrow">STEP 2</span><h3>Rank faculty preferences</h3></div><span className="pill">Up to 5 distinct faculties</span></div>
+        {!selectedSubjects.length ? <div className="recommend-empty-card"><b>No subjects selected yet</b><p className="mut">Add a subject and click View to configure its faculty and theory period.</p></div> : !activeSubject ? <div className="recommend-empty-card"><b>Choose a subject to view</b></div> : <article className="recommend-subject-card" key={activeSubject.code}>
+          <div className="recommend-selected-heading"><div><b>{activeSubject.code}</b><h4>{activeSubject.title}</h4><small className="recommend-view-status">Viewing faculty options for this subject · {selectedSubjects.length} selected in total</small></div><button type="button" className="text-clear-btn" disabled={isGenerating} onClick={() => toggleSubject(activeSubject)}>Remove subject</button></div>
+          <div className="recommend-credit-grid">
+            <label className="recommend-credit-component"><span>Credits for ETH (theory)</span><input type="number" min="0" max="50" step="0.5" value={creditsByCode[activeSubject.code]?.eth ?? ""} onChange={(event) => { setCreditsByCode((old) => ({ ...old, [activeSubject.code]: { ...(old[activeSubject.code] || { eth: "", ela: "" }), eth: event.target.value } })); setMessage(""); }} placeholder="ETH credits (optional)" /></label>
+            <label className="recommend-credit-component"><span>Credits for ELA (lab)</span><input type="number" min="0" max="50" step="0.5" value={creditsByCode[activeSubject.code]?.ela ?? ""} onChange={(event) => { setCreditsByCode((old) => ({ ...old, [activeSubject.code]: { ...(old[activeSubject.code] || { eth: "", ela: "" }), ela: event.target.value } })); setMessage(""); }} placeholder="ELA credits (optional)" /></label>
+          </div>
+          <div className="recommend-preference-topline"><span>Selectable faculty-period offerings</span><b>{activePreferences.length}/5 distinct faculties selected</b></div>
+          <div className="recommend-faculty-search">
+            <label htmlFor={`recommend-faculty-search-${activeSubject.code}`}>Search faculty or slot</label>
+            <div className="recommend-faculty-search-control">
+              <span className="recommend-faculty-search-icon" aria-hidden="true">⌕</span>
+              <input
+                id={`recommend-faculty-search-${activeSubject.code}`}
+                type="search"
+                value={facultySearchQuery}
+                onChange={(event) => setFacultySearchQuery(event.target.value)}
+                placeholder="Faculty name or slot (e.g. Arulkumar, A2, L45+L46)"
+                aria-label={`Search faculty name or slot for ${activeSubject.code}`}
+                disabled={isGenerating}
+              />
+              {facultySearchQuery && <button type="button" onClick={() => setFacultySearchQuery("")} disabled={isGenerating} aria-label="Clear faculty and slot search">Clear</button>}
+            </div>
+            <small className="recommend-faculty-search-count">{filteredFacultyOptions.length} of {activeFacultyOptions.length} faculty-period options shown. Filtering does not change your saved selections or priorities.</small>
+          </div>
+          {!activeFacultyOptions.length ? <p className="recommend-inline-warning">No valid faculty-period offerings were found. If both theory and lab exist, this requires a same-faculty match that follows the slot-mapping rule.</p> : !filteredFacultyOptions.length ? <p className="recommend-faculty-no-results">No faculty or slot matches “{facultySearchQuery}”. Try another name or slot code.</p> : <div className="recommend-faculty-list">
+            {filteredFacultyOptions.map((facultyOption) => {
+              const selected = activePreferences.find((item) => (item.variantId || item.key) === facultyOption.variantId);
+              const variantSelected = Boolean(selected);
+              const displayOfferings = [...facultyOption.offerings].sort((a, b) => (a.group === "LAB" ? 0 : 1) - (b.group === "LAB" ? 0 : 1));
+              return <div className={`recommend-faculty-option${variantSelected ? " active" : ""}`} key={facultyOption.variantId}>
+                <label className="recommend-faculty-check"><input type="checkbox" checked={variantSelected} disabled={isGenerating || (!selected && activePreferences.length >= 5)} onChange={() => toggleFaculty(activeSubject, facultyOption)} /><span><b>{facultyOption.faculty}</b><small className="recommend-option-phase">{facultyOption.phaseLabel}</small>{displayOfferings.map((offering, index) => <small className="recommend-option-slot" key={`${offering.group}-${offering.signature || offering.slotDetail}-${index}`}><strong>{offering.type}</strong> · {offering.slotDetail} · {offering.venue || "Venue not listed"}</small>)}</span></label>
+                {selected && <label className="recommend-rank-control"><span>Priority</span><select aria-label={`Priority for ${facultyOption.faculty}, ${facultyOption.phaseLabel} in ${activeSubject.code}`} value={selected.rank} disabled={isGenerating} onChange={(event) => changeFacultyRank(activeSubject.code, facultyOption.variantId, event.target.value)}>{activePreferences.map((item) => <option key={item.rank} value={item.rank}>{item.rank}{item.rank === 1 ? " — Best" : ""}</option>)}</select></label>}
+              </div>;
+            })}
+          </div>}
+        </article>}
+      </section>
+    </div>
+
+    <div className="recommend-generate-row"><div><b>Search for the best combinations</b><p className="mut">Hard slot clashes and enabled timetable rules are rejected before ranking. Preference scores are 100, 80, 60, 40 and 20 for ranks 1–5. ETH and ELA are paired only when the subject, faculty and slot mapping match.</p></div><button type="button" className="btn p recommend-generate-btn" onClick={generate} disabled={isGenerating}>{isGenerating ? "Searching valid combinations…" : "✦ Generate recommendations"}</button></div>
+    {isGenerating && <div className="recommend-progress" role="status"><span className="recommend-spinner" />Checking slot conflicts, faculty priorities and feasible combinations…</div>}
+    {message && <div className={`recommend-message ${messageType}`} role="alert">{message}</div>}
+
+    {generation?.results?.length > 0 && <section className="recommend-results-section"><div className="recommend-results-heading"><div><span className="eyebrow">STEP 3</span><h3>Best valid combinations</h3><p className="mut">Showing up to three unique timetables. Your existing timetable remains unchanged; saving creates a separate plan.</p></div><span className="pill">{generation.results.length} result{generation.results.length === 1 ? "" : "s"}</span></div>
+      {generation.error && generation.status === "limit" && <div className="recommend-message warning" role="status">{generation.error}</div>}
+      <div className="recommend-results-grid">
+        {generation.results.slice(0, 3).map((result) => {
+          const previewOpen = previewedSignature === result.signature;
+          const percent = result.maximumScore > 0 ? Math.round((result.score / result.maximumScore) * 100) : 0;
+          return <article className="card recommend-result-card" key={result.signature}>
+            <div className="recommend-result-top"><div><span className="eyebrow">RECOMMENDATION {result.rank}</span><h4>{result.rank === 1 ? "Best match" : result.rank === 2 ? "Alternative option" : "Another valid option"}</h4></div><span className="recommend-score">{result.score}<small> / {result.maximumScore}</small></span></div>
+            <div className="recommend-score-line"><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></div><p className="recommend-score-caption">Faculty preference score · {percent}% of the combined per-subject maximum. A faculty member is scored once per subject, even when both ETH and ELA are paired.</p>
+            <div className="recommend-result-subjects">{result.courses.map((course) => <div className="recommend-result-subject" key={course.subjectCode}><div className="recommend-result-subject-heading"><b>{course.subjectCode}</b><span>{course.score} pts</span></div><strong>{course.subjectTitle}</strong><div className="recommend-result-components">{course.selectedOfferings.map((offering, index) => <div className="recommend-result-component" key={`${offering.type}-${offering.facultyKey}-${offering.slotDetail}-${index}`}><span className={`recommend-type-badge ${offering.group === "LAB" ? "lab" : offering.group === "THEORY" ? "theory" : "other"}`}>{offering.type}</span><span><b>{offering.faculty}</b><small>{offering.slotDetail} · {offering.venue || "Venue not listed"} · Preference {offering.rank}</small></span></div>)}</div></div>)}</div>
+            <div className="recommend-result-actions"><button type="button" className="btn s ghost-btn" onClick={() => setPreviewedSignature(previewOpen ? "" : result.signature)}>{previewOpen ? "Close weekly preview" : "Preview weekly timetable"}</button><button type="button" className="btn p" onClick={() => applyRecommendation(result)} disabled={Boolean(savingSignature) || !canSave}>{savingSignature === result.signature ? "Saving…" : "Save as new timetable"}</button></div>
+            {!canSave && <p className="recommend-help">Leave the shared room to save this as a separate private timetable.</p>}
+          </article>;
+        })}
+      </div>
+      <p className="recommend-benchmark">Search explored {generation.nodesExplored?.toLocaleString() || 0} states in {generation.elapsedMs ?? 0} ms. Candidate options before/after filtering: {(generation.candidateCounts || []).map((item) => `${item.code} ${item.before}→${item.after}`).join(" · ") || "not available"}. {generation.status === "complete" ? "Search completed; results are ranked by score with deterministic tie-breaking." : "Search was bounded; results are the best found so far and may not be globally optimal."}</p>
+    </section>}
+    <RecommendationPreviewModal open={Boolean(previewResult)} subjectName={previewResult?.courses?.map((course) => course.subjectCode).join(", ")} courses={previewCourses} onClose={closePreview} />
+  </section>;
+}
+
+function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalogChange, hiddenCatalogCodes, onHiddenCatalogCodesChange, cloudMode, cloudStatus, onGoogleLogin, activeCollab, collabOpen, pendingRoomId, collabBusy, collabError, openCollab, closeCollab, createCollab, joinCollab, leaveCollab, clearCollabError, firebaseConfigured, openTutorial, tutorialOpen, tutorialMode, closeTutorial, onSaveRecommendedTimetable }) {
   const [f, setF] = useState(blank);
   const [slots, setSlots] = useState("");
   const [catalogCode, setCatalogCode] = useState("");
   const [catalogOffering, setCatalogOffering] = useState("");
+  const [addTogether, setAddTogether] = useState(false);
+  const [pairingNotice, setPairingNotice] = useState("");
+  const [pairingNoticeType, setPairingNoticeType] = useState("success");
+  const [showRecommendations, setShowRecommendations] = useState(false);
   const [manageCatalogCode, setManageCatalogCode] = useState("");
   const [importSubject, setImportSubject] = useState("");
   const [importTable, setImportTable] = useState("");
@@ -914,14 +1375,16 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
     meta: `${course.offerings?.length || 0} faculty/class options · ${customCatalog.some((item) => item.code === course.code) ? "Personal subject" : "Default catalogue"}`,
   }));
   const selectCatalogCourse = (code) => {
+    setPairingNotice("");
     setCatalogCode(code);
     setCatalogOffering("");
     const item = availableCatalog.find((c) => c.code === code);
-    setF((old) => ({ ...old, code: item?.code || "", title: item?.title || "", faculty: "", venue: "" }));
+    setF((old) => ({ ...old, code: item?.code || "", title: item?.title || "", credits: "", ethCredits: "", elaCredits: "", faculty: "", venue: "" }));
     setSlots("");
     setErr("");
   };
   const selectCatalogOffering = (index) => {
+    setPairingNotice("");
     setCatalogOffering(index);
     const item = catalogOfferings[Number(index)];
     if (!item) return;
@@ -933,26 +1396,134 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
   const bad = tt.courses.filter((c) => ruleHits(c, rules).length);
   const setRule = (k) => update((t) => ({ ...t, rules: { ...(t.rules || {}), [k]: !(t.rules || {})[k] } }));
   const credits = Number(tt.courses.reduce((x, c) => x + Number(c.credits || 0), 0).toFixed(2));
+  const registeredSubjectCount = countUniqueSubjects(tt.courses);
   const parsedSlots = parseSlots(slots);
-  const toggle = (s) => { const current = parseSlots(slots); setSlots((current.includes(s) ? current.filter((x) => x !== s) : [...current, s]).join("+")); setErr(""); };
+  const toggle = (s) => {
+    const current = parseSlots(slots);
+    setSlots((current.includes(s) ? current.filter((x) => x !== s) : [...current, s]).join("+"));
+    setCatalogOffering("");
+    setErr("");
+  };
+
+  const resetCourseForm = (message = "", messageType = "success") => {
+    setF(blank);
+    setSlots("");
+    setCatalogCode("");
+    setCatalogOffering("");
+    setErr("");
+    setPairingNotice(message);
+    setPairingNoticeType(messageType);
+  };
 
   const add = (ev) => {
     ev?.preventDefault();
-    const code = f.code.trim().toUpperCase(), cd = parseFloat(f.credits), sl = parseSlots(slots);
+    setPairingNotice("");
+    setErr("");
+    const code = f.code.trim().toUpperCase();
+    const sl = parseSlots(slots);
     if (!code && !f.title.trim()) return setErr("Enter a course code or title.");
-    if (f.credits === "" || Number.isNaN(cd)) return setErr("Enter the credits.");
     if (!sl.length) return setErr("Enter at least one slot.");
     const unk = sl.filter((s) => !ALL.has(s));
     if (unk.length) return setErr("Unknown slot: " + unk.join(", "));
-    const c = { id: uid(), code, title: f.title.trim(), credits: cd, slots: [...new Set(sl)], faculty: f.faculty.trim(), venue: f.venue.trim(), color: COL[tt.courses.length % COL.length] };
-    const rh = ruleHits(c, rules);
-    if (rh.length) return setErr(`Breaks your timetable rule — class at ${rh.slice(0, 3).join(", ")}${rh.length > 3 ? " …" : ""}.`);
-    const cl = clashes(c, tt.courses);
-    if (cl.length) return setErr("Slot clash:\n" + cl.slice(0, 3).join("\n") + (cl.length > 3 ? `\n+${cl.length - 3} more` : ""));
-    update((t) => ({ ...t, courses: [...t.courses, c] }));
-    setF(blank); setSlots(""); setErr(""); setCatalogCode(""); setCatalogOffering("");
-  };
 
+    const selectedOffering = selectedCatalogCourse && catalogOffering !== ""
+      ? catalogOfferings[Number(catalogOffering)]
+      : null;
+    const selectedOfferingSlots = selectedOffering ? parseSlots(selectedOffering.slot) : [];
+    const selectedOfferingMatchesInput = selectedOffering && selectedOfferingSlots.length === sl.length
+      && selectedOfferingSlots.every((slot) => sl.includes(slot)) && sl.every((slot) => selectedOfferingSlots.includes(slot));
+    const selectedKind = addTogether
+      ? (offeringKind(selectedOffering) || (sl.every((slot) => /^L\d+$/i.test(slot)) ? "lab" : "theory"))
+      : null;
+    const componentCredits = { eth: f.ethCredits, ela: f.elaCredits };
+    const activeCreditRaw = addTogether ? componentCredits[selectedKind === "lab" ? "ela" : "eth"] : f.credits;
+    const cd = String(activeCreditRaw ?? "").trim() === "" ? 0 : Number(activeCreditRaw);
+
+    if (!addTogether && (String(f.credits ?? "").trim() === "" || !Number.isFinite(cd))) return setErr("Enter the credits.");
+    if (!addTogether && (cd < 0 || cd > 50)) return setErr("Enter credits between 0 and 50.");
+    if (addTogether) {
+      const invalidCreditComponents = Object.entries(componentCredits)
+        .filter(([, value]) => String(value ?? "").trim() !== "" && (!Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 50))
+        .map(([kind]) => kind.toUpperCase());
+      if (invalidCreditComponents.length) return setErr(`Enter ETH/ELA credits between 0 and 50, or leave them blank: ${invalidCreditComponents.join(", ")}.`);
+    }
+
+    const baseCourse = {
+      id: uid(),
+      code,
+      title: f.title.trim(),
+      credits: cd,
+      slots: [...new Set(sl)],
+      faculty: f.faculty.trim(),
+      venue: f.venue.trim(),
+      color: COL[tt.courses.length % COL.length],
+      ...(addTogether ? { type: selectedKind === "lab" ? "ELA" : "ETH", componentType: selectedKind === "lab" ? "ELA" : "ETH" } : {}),
+      ...(selectedOfferingMatchesInput ? {
+        slotVenues: Object.fromEntries(sl.map((slot) => [slot, selectedOffering?.venue || f.venue.trim()])),
+        slotFaculties: Object.fromEntries(sl.map((slot) => [slot, selectedOffering?.faculty || f.faculty.trim()])),
+      } : {}),
+    };
+
+    const checkConflicts = (candidateSlots, existing) => addTogether
+      ? intervalClashes(candidateSlots, existing)
+      : clashes({ ...baseCourse, slots: candidateSlots }, existing);
+    const rh = ruleHits(baseCourse, rules);
+    if (rh.length) return setErr(`Breaks your timetable rule — class at ${rh.slice(0, 3).join(", ")}${rh.length > 3 ? " …" : ""}.`);
+    const baseClashes = checkConflicts(baseCourse.slots, tt.courses);
+    if (baseClashes.length) return setErr("Slot clash:\n" + baseClashes.slice(0, 3).join("\n") + (baseClashes.length > 3 ? `\n+${baseClashes.length - 3} more` : ""));
+
+    // Add Together pairs only an unchanged catalogue offering with an explicit
+    // ETH/ELA type. Manual entries remain single-component selections.
+    const pairing = resolvePairing({
+      addTogether,
+      selectedOffering,
+      selectedOfferingMatchesInput,
+      selectedIndex: catalogOffering,
+      offerings: catalogOfferings,
+      baseCourse,
+      existingCourses: tt.courses,
+    });
+    const pairedCourse = pairing.pairedCourse;
+    let shouldAddPair = Boolean(pairedCourse && pairing.counterpartOffering);
+    let pairingFeedback = pairing.feedback;
+    let pairingFeedbackType = pairing.feedbackType;
+
+    let finalCourse = pairedCourse || baseCourse;
+    const finalRuleHits = ruleHits(finalCourse, rules);
+    if (finalRuleHits.length && pairedCourse) {
+      finalCourse = baseCourse;
+      shouldAddPair = false;
+      pairingFeedback = `The matching component would violate your timetable preferences (${finalRuleHits.slice(0, 2).join(", ")}). Only the selected component was added.`;
+      pairingFeedbackType = "warning";
+    } else if (finalRuleHits.length) {
+      return setErr(`Breaks your timetable rule — class at ${finalRuleHits.slice(0, 3).join(", ")}${finalRuleHits.length > 3 ? " …" : ""}.`);
+    }
+    const finalClashes = checkConflicts(finalCourse.slots, tt.courses);
+    if (finalClashes.length) return setErr("Slot clash:\n" + finalClashes.slice(0, 3).join("\n") + (finalClashes.length > 3 ? `\n+${finalClashes.length - 3} more` : ""));
+
+    let coursesToAdd;
+    if (!addTogether) {
+      coursesToAdd = [baseCourse];
+    } else if (shouldAddPair) {
+      coursesToAdd = buildPairedComponentRows({
+        baseCourse,
+        selectedOffering,
+        counterpartOffering: pairing.counterpartOffering,
+        counterpartSlots: pairing.counterpartSlots,
+        componentCredits,
+      }).map((course) => ({ ...course, id: uid(), color: baseCourse.color }));
+      if (!coursesToAdd.length) {
+        const single = buildComponentCourseRow({ baseCourse, offering: selectedOffering, kind: selectedKind, slots: baseCourse.slots, componentCredits });
+        coursesToAdd = [{ ...single, id: baseCourse.id, color: baseCourse.color }];
+      }
+    } else {
+      const single = buildComponentCourseRow({ baseCourse, offering: selectedOffering, kind: selectedKind, slots: baseCourse.slots, componentCredits });
+      coursesToAdd = [{ ...single, id: baseCourse.id, color: baseCourse.color }];
+    }
+
+    update((t) => ({ ...t, courses: [...t.courses, ...coursesToAdd] }));
+    resetCourseForm(pairingFeedback, pairingFeedbackType);
+  };
   const removeCourse = (id) => update((t) => ({ ...t, courses: t.courses.filter((c) => c.id !== id) }));
 
   const beginEditCredits = (course) => {
@@ -1009,9 +1580,19 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
         <button className="btn s ghost-btn print-btn" onClick={() => window.print()}>↗ Export / Print</button>
       </AppHeader>
       <div className="wrap planner-wrap">
-        <div className="planner-heading"><div><div className="eyebrow">YOUR SEMESTER</div><h1>{activeCollab ? "Plan together, live." : "Build your timetable."}</h1><p className="mut">{activeCollab ? "Everyone in this room sees timetable changes as they happen." : "Add courses below. We’ll flag slot clashes as you go."}</p></div><div className="planner-heading-actions"><div className="heading-metrics"><div><b>{tt.courses.length.toString().padStart(2, "0")}</b><small>COURSES</small></div><div><b>{credits}</b><small>CREDITS</small></div></div><button className={`btn ${activeCollab ? "s ghost-btn" : "p"} collaborate-trigger`} onClick={openCollab} disabled={Boolean(activeCollab)} title={activeCollab ? "Use the room controls below while collaborating" : "Create or join a shared timetable room"}>{activeCollab ? "● Collaboration active" : "↗ Collaborate"}</button></div></div>
+        <div className="planner-heading"><div><div className="eyebrow">YOUR SEMESTER</div><h1>{activeCollab ? "Plan together, live." : "Build your timetable."}</h1><p className="mut">{activeCollab ? "Everyone in this room sees timetable changes as they happen." : "Add courses below. We’ll flag slot clashes as you go."}</p></div><div className="planner-heading-actions"><div className="heading-metrics"><div><b>{registeredSubjectCount.toString().padStart(2, "0")}</b><small>SUBJECTS</small></div><div><b>{credits}</b><small>CREDITS</small></div></div><button className="btn s recommend-open-btn" type="button" onClick={() => setShowRecommendations((value) => !value)}>{showRecommendations ? "← Back to timetable" : "✦ Recommended"}</button><button className={`btn ${activeCollab ? "s ghost-btn" : "p"} collaborate-trigger`} onClick={openCollab} disabled={Boolean(activeCollab)} title={activeCollab ? "Use the room controls below while collaborating" : "Create or join a shared timetable room"}>{activeCollab ? "● Collaboration active" : "↗ Collaborate"}</button></div></div>
         {activeCollab && <section className="collab-room-banner"><div className="collab-room-icon">↗</div><div className="collab-room-main"><div className="collab-room-title"><b>Live collaboration room</b><span className="live-pill"><i /> LIVE</span></div><p>{activeCollab.data?.participants?.length || 1} {((activeCollab.data?.participants?.length || 1) === 1) ? "person has" : "people have"} joined this room. Changes to courses, slots, rules and credits sync automatically.</p><div className="collab-share-details"><span><small>ROOM CODE</small><b>{activeCollab.code}</b></span><button type="button" className="btn s ghost-btn" onClick={() => copyRoomValue(activeCollab.code, "Room code")}>Copy code</button><span className="collab-link-preview" title={activeCollab.link}><small>SHARE LINK</small><b>{activeCollab.link}</b></span><button type="button" className="btn s ghost-btn" onClick={() => copyRoomValue(activeCollab.link, "Share link")}>Copy link</button></div>{copyFeedback && <p className="copy-feedback" role="status">{copyFeedback}</p>}{collabError && <p className="err collab-inline-error" role="alert">{collabError}</p>}</div><button type="button" className="btn s ghost-btn leave-room-btn" onClick={leaveCollab}>Leave room</button></section>}
 
+        {showRecommendations ? (
+          <RecommendedWorkspace
+            availableCatalog={availableCatalog}
+            currentTimetable={tt}
+            rules={rules}
+            canSave={!activeCollab}
+            onBack={() => setShowRecommendations(false)}
+            onSave={(draft) => { onSaveRecommendedTimetable(draft); setShowRecommendations(false); setPairingNotice("Saved as a new timetable. Your previous timetable was not changed — you can edit this one below."); setPairingNoticeType("success"); }}
+          />
+        ) : <>
         <section className="card course-builder">
           <div className="builder-top"><div className="builder-title"><span className="builder-icon">＋</span><div><h2>Add a course</h2><p className="mut">Course details and slot selection</p></div></div><span className="builder-note"><span className="tiny-dot" /> Clash checking is on</span></div>
           <div className="catalog-pickers">
@@ -1035,6 +1616,20 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
               emptyMessage="No faculty or classes match that search."
             />
             <p className="catalog-help">Selecting a class fills the course code, title, faculty, venue and slot. Credits aren't listed in the document, so enter them manually.</p>
+            <div className="add-together-control">
+              <label className="sw add-together-toggle"><input type="checkbox" checked={addTogether} onChange={(event) => {
+                const enabled = event.target.checked;
+                const selected = selectedCatalogCourse && catalogOffering !== "" ? catalogOfferings[Number(catalogOffering)] : null;
+                const inferredKind = offeringKind(selected) || (parseSlots(slots).length && parseSlots(slots).every((slot) => /^L\d+$/i.test(slot)) ? "lab" : "theory");
+                setF((old) => enabled
+                  ? { ...old, ethCredits: old.ethCredits !== "" ? old.ethCredits : (inferredKind === "theory" ? old.credits : ""), elaCredits: old.elaCredits !== "" ? old.elaCredits : (inferredKind === "lab" ? old.credits : "") }
+                  : { ...old, credits: inferredKind === "lab" ? (old.elaCredits !== "" ? old.elaCredits : old.credits) : (old.ethCredits !== "" ? old.ethCredits : old.credits) });
+                setAddTogether(enabled);
+                setPairingNotice("");
+              }} /><i />Add Together</label>
+              <span className="add-together-help">When enabled, automatically add the matching theory/lab for the same subject and faculty using the slot rules.</span>
+              {pairingNotice && <p className={`pairing-notice ${pairingNoticeType}`} role="status">{pairingNotice}</p>}
+            </div>
           </div>
           <div className="custom-import-panel">
             <div className="custom-import-heading"><div><h3>Import your own subject faculty list</h3><p className="mut">Paste the subject name and copied table (including Slot Detail, Venue, Faculty and Course Type). We'll parse the rows into your personal dropdown.</p></div><span className="pill">Private to your account</span></div>
@@ -1096,23 +1691,27 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
             </div>
           </div>
           <form onSubmit={add}>
-            <div className="course-fields">
+            <div className={`course-fields${addTogether ? " add-together-mode" : ""}`}>
               <label>Course code<input value={f.code} onChange={set("code")} placeholder="BACSE202" /></label>
-              <label>Credits<input type="number" min="0" step="0.5" value={f.credits} onChange={set("credits")} placeholder="3" /></label>
+              {!addTogether && <label>Credits<input type="number" min="0" max="50" step="0.5" value={f.credits} onChange={set("credits")} placeholder="3" /></label>}
               <label className="title-field">Course title<input value={f.title} onChange={set("title")} placeholder="Data Structures and Algorithms" /></label>
-              <label className="slots-field">Slot(s)<input value={slots} onChange={(ev) => { setSlots(ev.target.value); setErr(""); }} placeholder="e.g. A1+TA1 or L3+L4" /></label>
+              <label className="slots-field">Slot(s)<input value={slots} onChange={(ev) => { setSlots(ev.target.value); setCatalogOffering(""); setErr(""); }} placeholder="e.g. A1+TA1 or L3+L4" /></label>
               <label>Faculty<input value={f.faculty} onChange={set("faculty")} placeholder="Faculty name" /></label>
               <label>Venue<input value={f.venue} onChange={set("venue")} placeholder="PRP329" /></label>
             </div>
+            {addTogether && <div className="paired-credit-fields" aria-label="Separate theory and lab credits">
+              <label><span>Credits for ETH (theory)</span><input type="number" min="0" max="50" step="0.5" value={f.ethCredits} onChange={set("ethCredits")} placeholder="ETH credits (optional)" /></label>
+              <label><span>Credits for ELA (lab)</span><input type="number" min="0" max="50" step="0.5" value={f.elaCredits} onChange={set("elaCredits")} placeholder="ELA credits (optional)" /></label>
+            </div>}
             <div className="builder-actions"><div className="err builder-error">{err}</div><button className="btn p add-btn" type="submit">＋ Add to timetable</button></div>
           </form>
-          {tt.courses.length > 0 && <div className="course-list-wrap"><div className="course-list-heading"><span>ADDED COURSES <b>{tt.courses.length}</b></span><small>Remove a course with ×</small></div><div className="course-list">
-            {tt.courses.map((c) => <div className="course-chip" key={c.id}><span className="course-chip-color" style={{ background: c.color }} /><div className="course-chip-text"><b>{c.code || c.title || "Untitled course"}</b><small>{c.title && c.code ? c.title : c.slots.join(" + ")} · {c.credits} cr</small></div><button className="course-edit-btn" type="button" onClick={() => beginEditCredits(c)} title={`Edit credits for ${c.code || c.title}`}>Edit</button><button className="icon-button" onClick={() => removeCourse(c.id)} title={`Remove ${c.code || c.title}`}>×</button></div>)}
+          {tt.courses.length > 0 && <div className="course-list-wrap"><div className="course-list-heading"><span>ADDED ENTRIES (theory / lab rows) <b>{tt.courses.length}</b></span><small>Remove a course with ×</small></div><div className="course-list">
+            {tt.courses.map((c) => <div className="course-chip" key={c.id}><span className="course-chip-color" style={{ background: c.color }} /><div className="course-chip-text"><b>{c.code || c.title || "Untitled course"}</b><small>{(c.componentType || c.type) && <b className="course-chip-component">{c.componentType || c.type}</b>}{c.title && c.code ? c.title : c.slots.join(" + ")} · {c.credits} cr{(c.componentType || c.type) && c.slots?.length ? ` · ${c.slots.join(" + ")}` : ""}</small></div><button className="course-edit-btn" type="button" onClick={() => beginEditCredits(c)} title={`Edit credits for ${c.code || c.title}`}>Edit</button><button className="icon-button" onClick={() => removeCourse(c.id)} title={`Remove ${c.code || c.title}`}>×</button></div>)}
           </div></div>}
         </section>
 
         <section className="schedule-section">
-          <div className="schedule-top"><div><div className="eyebrow">WEEKLY VIEW</div><h2>Your timetable</h2><p className="mut">Tap an available slot tag to add it to the course form above.</p></div><div className="schedule-badges"><span className="pill"><span className="pill-dot" /> {tt.courses.length} courses</span><span className="pill">{credits} credits</span></div></div>
+          <div className="schedule-top"><div><div className="eyebrow">WEEKLY VIEW</div><h2>Your timetable</h2><p className="mut">Tap an available slot tag to add it to the course form above.</p></div><div className="schedule-badges"><span className="pill"><span className="pill-dot" /> {registeredSubjectCount} {registeredSubjectCount === 1 ? "subject" : "subjects"}</span><span className="pill">{credits} credits</span></div></div>
           <div className="rule-toolbar">
             <span className="toolbar-label">PREFERENCES</span>
             <label className="sw"><input type="checkbox" checked={!!rules.no8} onChange={() => setRule("no8")} /><i />No 8 AM classes</label>
@@ -1159,7 +1758,7 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
                         const slotTag = slot !== "-" && slot !== "|"
                           ? <button type="button" key={slot} className={`tag${!course && parsedSlots.includes(slot) ? " on" : ""}`} disabled={Boolean(course)} onClick={() => toggle(slot)} title={course ? "This time is occupied" : `Use slot ${slot}`}>{slot}</button>
                           : <span className="slot-dash">-</span>;
-                        return <td key={`theory-${i}`}><div className={`cell ${course ? "filled" : "empty"}${course && cols.includes(i) ? " viol" : ""}`} style={course ? { background: course.color } : undefined}><div className="tags">{slotTag}</div>{course && <><b title={course.title || course.code}>{course.title || course.code}</b><i title={course.faculty}>{course.faculty}</i>{course.venue && <i title={course.venue}>{course.venue}</i>}<span className="cell-code">{course.code} · {course.credits} cr</span></>}</div></td>;
+                        return <td key={`theory-${i}`}><div className={`cell ${course ? "filled" : "empty"}${course && cols.includes(i) ? " viol" : ""}`} style={course ? { background: course.color } : undefined}><div className="tags">{slotTag}</div>{course && <><b title={course.title || course.code}>{course.title || course.code}</b><i title={course.slotFaculties?.[slot] || course.faculty}>{course.slotFaculties?.[slot] || course.faculty}</i>{(course.slotVenues?.[slot] || course.venue) && <i title={course.slotVenues?.[slot] || course.venue}>{course.slotVenues?.[slot] || course.venue}</i>}<span className="cell-code">{course.code} · {course.credits} cr</span></>}</div></td>;
                       })}
                     </tr>
                     <tr className="lab-schedule-row">
@@ -1170,7 +1769,7 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
                         const slotTag = slot !== "-" && slot !== "|"
                           ? <button type="button" key={slot} className={`tag${!course && parsedSlots.includes(slot) ? " on" : ""}`} disabled={Boolean(course)} onClick={() => toggle(slot)} title={course ? "This time is occupied" : `Use slot ${slot}`}>{slot}</button>
                           : <span className="slot-dash">-</span>;
-                        return <td key={`lab-${i}`}><div className={`cell ${course ? "filled" : "empty"}${course && cols.includes(i) ? " viol" : ""}`} style={course ? { background: course.color } : undefined}><div className="tags">{slotTag}</div>{course && <><b title={course.title || course.code}>{course.title || course.code}</b><i title={course.faculty}>{course.faculty}</i>{course.venue && <i title={course.venue}>{course.venue}</i>}<span className="cell-code">{course.code} · {course.credits} cr</span></>}</div></td>;
+                        return <td key={`lab-${i}`}><div className={`cell ${course ? "filled" : "empty"}${course && cols.includes(i) ? " viol" : ""}`} style={course ? { background: course.color } : undefined}><div className="tags">{slotTag}</div>{course && <><b title={course.title || course.code}>{course.title || course.code}</b><i title={course.slotFaculties?.[slot] || course.faculty}>{course.slotFaculties?.[slot] || course.faculty}</i>{(course.slotVenues?.[slot] || course.venue) && <i title={course.slotVenues?.[slot] || course.venue}>{course.slotVenues?.[slot] || course.venue}</i>}<span className="cell-code">{course.code} · {course.credits} cr</span></>}</div></td>;
                       })}
                     </tr>
                   </Fragment>
@@ -1185,17 +1784,52 @@ function Planner({ tt, user, back, logout, update, customCatalog, onCustomCatalo
           <div className="credit-summary-copy"><span className="eyebrow">AT A GLANCE</span><h2>Credits in this timetable</h2><p className="mut">Total credits for the subjects you have added.</p></div>
           <div className="credit-summary-value"><b>{credits}</b><span>{credits === 1 ? "credit" : "credits"}</span></div>
           <div className="credit-summary-divider" />
-          <div className="credit-summary-courses"><b>{tt.courses.length}</b><span>{tt.courses.length === 1 ? "subject registered" : "subjects registered"}</span></div>
+          <div className="credit-summary-courses"><b>{registeredSubjectCount}</b><span>{registeredSubjectCount === 1 ? "subject registered" : "subjects registered"}</span></div>
         </section>
+        </>}
       </div>
       <CollaborateModal open={collabOpen} pendingRoomId={pendingRoomId} canCreate={!activeCollab} busy={collabBusy} error={collabError} firebaseConfigured={firebaseConfigured} timetable={tt} onClose={closeCollab} onCreate={createCollab} onJoin={joinCollab} onClearError={clearCollabError} />
       {editingCreditsFor && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setEditingCreditsFor(null); }}><section className="app-modal credits-modal" role="dialog" aria-modal="true" aria-labelledby="edit-credits-title"><div className="modal-heading"><div><span className="eyebrow">COURSE DETAILS</span><h2 id="edit-credits-title">Edit course credits</h2><p className="mut">Correct the credit value without removing this subject.</p></div><button type="button" className="icon-button modal-close" onClick={() => setEditingCreditsFor(null)} aria-label="Close edit credits">×</button></div><form onSubmit={saveEditedCredits}><label className="modal-field">Credits<input autoFocus type="number" min="0" max="50" step="0.5" value={editedCredits} onChange={(event) => { setEditedCredits(event.target.value); setEditCreditsError(""); }} /></label>{editCreditsError && <p className="err" role="alert">{editCreditsError}</p>}<div className="modal-actions"><button type="button" className="btn s ghost-btn" onClick={() => setEditingCreditsFor(null)}>Cancel</button><button type="submit" className="btn p" disabled={!editedCredits.trim()}>Save credits</button></div></form><p className="modal-footnote">{activeCollab ? "Saved credits sync to everyone in this room immediately." : "The timetable total updates automatically after saving."}</p></section></div>}
-      <TutorialModal open={tutorialOpen} onClose={closeTutorial} />
+      <TutorialModal open={tutorialOpen} mode={tutorialMode} onClose={closeTutorial} />
     </>
   );
 }
 
-function TutorialModal({ open, onClose }) {
+function TutorialVideoCard({ number, title, description, embedUrl, watchUrl, tone, children }) {
+  return (
+    <section className={`tutorial-feature-card tutorial-tone-${tone}`} aria-labelledby={`tutorial-feature-${number}`}>
+      <div className="tutorial-feature-heading">
+        <span className="tutorial-feature-number">{number}</span>
+        <div>
+          <h3 id={`tutorial-feature-${number}`}>{title}</h3>
+          <p>{description}</p>
+        </div>
+      </div>
+      <div className="tutorial-feature-video">
+        {embedUrl ? (
+          <iframe
+            title={title}
+            src={embedUrl}
+            loading="lazy"
+            referrerPolicy="strict-origin-when-cross-origin"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            allowFullScreen
+          />
+        ) : (
+          <div className="tutorial-video-placeholder">
+            <span className="tutorial-play-icon">▶</span>
+            <b>Video unavailable</b>
+            <span>Open this tutorial directly on YouTube.</span>
+          </div>
+        )}
+      </div>
+      {children && <div className="tutorial-feature-note">{children}</div>}
+      <a className="tutorial-watch-link" href={watchUrl} target="_blank" rel="noreferrer">Watch on YouTube ↗</a>
+    </section>
+  );
+}
+
+function TutorialModal({ open, mode = "all", onClose }) {
   useEffect(() => {
     if (!open) return undefined;
     const previousOverflow = document.body.style.overflow;
@@ -1209,44 +1843,56 @@ function TutorialModal({ open, onClose }) {
   }, [open, onClose]);
 
   if (!open) return null;
-  const invalidConfiguredUrl = Boolean(TUTORIAL_YOUTUBE_URL && !TUTORIAL_YOUTUBE_EMBED_URL);
+  const isUpdateWelcome = mode === "updates";
   return createPortal(
     <div className="modal-backdrop tutorial-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="app-modal tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-modal-title">
-        <div className="modal-heading">
-          <div><span className="eyebrow">QUICK START GUIDE</span><h2 id="tutorial-modal-title">Add your own course and faculty list</h2><p className="mut">A short walkthrough from VTOP to your searchable FFCS dropdown.</p></div>
+      <section className={`app-modal tutorial-modal ${isUpdateWelcome ? "tutorial-modal-updates" : "tutorial-modal-all"}`} role="dialog" aria-modal="true" aria-labelledby="tutorial-modal-title">
+        <div className="modal-heading tutorial-modal-heading">
+          <div>
+            <span className="eyebrow">{isUpdateWelcome ? "NEW IN FFCS PLANNER" : "QUICK START GUIDE"}</span>
+            <h2 id="tutorial-modal-title">{isUpdateWelcome ? "Welcome back — meet your new tools" : "Welcome to FFCS Planner"}</h2>
+            <p className="mut">{isUpdateWelcome
+              ? "Two new ways to build a timetable faster. Your familiar VTOP import guide is always available from Tutorial."
+              : "Learn the three key workflows: import faculty data, pair theory and lab classes, and generate recommended timetables."}</p>
+          </div>
           <button type="button" className="icon-button modal-close" onClick={onClose} aria-label="Close tutorial">×</button>
         </div>
-        <div className="tutorial-video-frame">
-          {TUTORIAL_YOUTUBE_EMBED_URL ? (
-            <iframe
-              title="FFCS custom course and faculty import tutorial"
-              src={TUTORIAL_YOUTUBE_EMBED_URL}
-              loading="lazy"
-              referrerPolicy="strict-origin-when-cross-origin"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-              allowFullScreen
-            />
-          ) : (
-            <div className="tutorial-video-placeholder">
-              <span className="tutorial-play-icon">▶</span>
-              <b>{invalidConfiguredUrl ? "Check your YouTube link" : "Course import walkthrough"}</b>
-              <span>{invalidConfiguredUrl
-                ? "Use a YouTube watch, youtu.be, Shorts, or embed link in VITE_TUTORIAL_YOUTUBE_URL."
-                : "The tutorial video is configured. If it does not load, open it directly on YouTube."}</span>
-              <code>https://youtu.be/0gD5SaLifac</code>
-            </div>
-          )}
+        <div className={`tutorial-feature-grid ${isUpdateWelcome ? "tutorial-feature-grid-updates" : ""}`}>
+          {!isUpdateWelcome && <TutorialVideoCard
+            number="01"
+            title="Import faculty list from VTOP"
+            description="Bring course offerings into your searchable subject and faculty list."
+            embedUrl={TUTORIAL_YOUTUBE_EMBED_URL}
+            watchUrl={TUTORIAL_YOUTUBE_URL || "https://youtu.be/0gD5SaLifac"}
+            tone="mint"
+          >
+            Sign in to VTOP, copy the faculty / class table, paste it into the subject importer, and parse the rows to save them.
+          </TutorialVideoCard>}
+          <TutorialVideoCard
+            number={isUpdateWelcome ? "01" : "02"}
+            title="Add Together: theory + lab"
+            description="Automatically find and add the matching lab when you choose a theory offering, or the reverse."
+            embedUrl={ADD_TOGETHER_YOUTUBE_EMBED_URL}
+            watchUrl={ADD_TOGETHER_YOUTUBE_URL}
+            tone="salmon"
+          >
+            Turn on Add Together when adding a course, then review the paired component and any slot clash warnings.
+          </TutorialVideoCard>
+          <TutorialVideoCard
+            number={isUpdateWelcome ? "02" : "03"}
+            title="Recommended timetables"
+            description="Set faculty preferences and priorities to generate strong timetable combinations."
+            embedUrl={RECOMMENDATION_YOUTUBE_EMBED_URL}
+            watchUrl={RECOMMENDATION_YOUTUBE_URL}
+            tone="lavender"
+          >
+            Choose your subjects, rank preferred faculty / slots, and compare the generated timetable options before saving one.
+          </TutorialVideoCard>
         </div>
-        {invalidConfiguredUrl && <div className="tutorial-storage-note" role="status"><b>Invalid YouTube URL</b><p>Use the full video URL from YouTube. Update VITE_TUTORIAL_YOUTUBE_URL in .env.local, restart Vite, and add the same variable in Vercel before redeploying.</p></div>}
-        <div className="tutorial-steps">
-          <div className="tutorial-step"><span>1</span><div><b>Sign in to VTOP</b><p>Open VTOP yourself and sign in with your own credentials. Never share your password or OTP.</p></div></div>
-          <div className="tutorial-step"><span>2</span><div><b>Open the subject's faculty / class list</b><p>Find the table containing Slot Detail, Venue, Faculty and Course Type.</p></div></div>
-          <div className="tutorial-step"><span>3</span><div><b>Copy the table rows</b><p>Include the header row and the available offerings. Copy the table from VTOP.</p></div></div>
-          <div className="tutorial-step"><span>4</span><div><b>Paste into FFCS Planner</b><p>Under “Import your own subject faculty list”, enter the subject name and paste the copied table.</p></div></div>
-          <div className="tutorial-step"><span>5</span><div><b>Parse and save the subject</b><p>Click “Parse and save subject”. The valid rows become searchable faculty / class options. Select one and enter course credits manually.</p></div></div>
+        <div className="tutorial-footer">
+          <span className="tutorial-footer-hint">You can reopen all three walkthroughs anytime using the Tutorial button.</span>
+          <button type="button" className="btn p" onClick={onClose}>{isUpdateWelcome ? "Explore new features" : "Let’s get started"}</button>
         </div>
-        <div className="tutorial-footer"><button type="button" className="btn p" onClick={onClose}>Got it</button></div>
       </section>
     </div>,
     document.body
