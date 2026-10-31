@@ -979,12 +979,12 @@ function RecommendationPreviewModal({ open, subjectName, courses, onClose }) {
     <div className="weekly-preview-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="weekly-preview-modal" role="dialog" aria-modal="true" aria-labelledby="weekly-preview-title">
         <header className="weekly-preview-header">
-          <div><span className="eyebrow">FULL-WEEK SCHEDULE</span><h2 id="weekly-preview-title">Weekly timetable preview</h2><p>{subjectName || "Recommended timetable"} · Complete theory and lab week</p></div>
+          <div><span className="eyebrow">MONDAY–FRIDAY SCHEDULE</span><h2 id="weekly-preview-title">Weekly timetable preview</h2><p>{subjectName || "Recommended timetable"} · Monday–Friday theory and lab timetable</p></div>
           <button type="button" className="icon-button weekly-preview-close" onClick={onClose} aria-label="Close weekly timetable preview" title="Close preview">×</button>
         </header>
         <div className="weekly-preview-body">
           <RecommendedScheduleGrid courses={courses || []} />
-          <p className="recommend-grid-footnote">The complete weekly grid is shown here using the project's official theory and lab timings. No time clashes were detected in this recommendation.</p>
+          <p className="recommend-grid-footnote">The Monday–Friday grid is shown here using the project's official theory and lab timings. No time clashes were detected in this recommendation.</p>
         </div>
         <footer className="weekly-preview-footer"><span>Scroll within this window to inspect the complete timetable.</span><button type="button" className="btn p" onClick={onClose}>Close preview</button></footer>
       </section>

@@ -5,8 +5,6 @@ const T = {
   WED: "C1 A1 F1 V1 V2 - | C2 A2 F2 TD2 TBB2 - V5",
   THU: "D1 B1 G1 TE1 TCC1 - | D2 B2 G2 TE2 TCC2 - V6",
   FRI: "E1 C1 TA1 TF1 TD1 - | E2 C2 TA2 TF2 TDD2 - V7",
-  SAT: "V8 X11 X12 Y11 Y12 - | X21 Z21 Y21 W21 W22 - V9",
-  SUN: "V10 Y11 Y12 X11 X12 - | Y21 Z21 X21 W21 W22 - V11",
 };
 const L = {
   MON: "L1 L2 L3 L4 L5 L6 | L31 L32 L33 L34 L35 L36 -",
@@ -14,8 +12,6 @@ const L = {
   WED: "L13 L14 L15 L16 L17 L18 | L43 L44 L45 L46 L47 L48 -",
   THU: "L19 L20 L21 L22 L23 L24 | L49 L50 L51 L52 L53 L54 -",
   FRI: "L25 L26 L27 L28 L29 L30 | L55 L56 L57 L58 L59 L60 -",
-  SAT: "L71 L72 L73 L74 L75 L76 | L77 L78 L79 L80 L81 L82 -",
-  SUN: "- - - - - - | - - - - - - -",
 };
 export const DAYS = Object.keys(T);
 export const TH = Object.fromEntries(DAYS.map((d) => [d, T[d].split(" ")]));
