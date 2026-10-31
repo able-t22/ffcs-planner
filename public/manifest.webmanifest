@@ -1,0 +1,21 @@
+{
+  "name": "FFCS Planner",
+  "short_name": "FFCS Planner",
+  "description": "FFCS timetable planner for VIT Vellore",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/og-image.png",
+      "sizes": "1200x630",
+      "type": "image/png"
+    }
+  ]
+}

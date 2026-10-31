@@ -4,12 +4,59 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0b1020" />
-    <meta name="description" content="Plan your VIT Vellore FFCS timetable with slot clash checks, credit tracking, and optional cloud sync." />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📅</text></svg>" />
-    <title>FFCS Planner — VIT Vellore</title>
+    <title>FFCS Planner – Free FFCS Timetable Generator for VIT Vellore</title>
+    <meta name="description" content="Free FFCS timetable planner and generator for VIT Vellore. Add slots and faculty, catch clashes instantly, auto-generate clash-free timetables, track credits and plan with friends." />
+    <meta name="keywords" content="FFCS, FFCS planner, FFCS timetable planner, FFCS timetable generator, VIT FFCS, VIT timetable maker, VIT Vellore timetable, FFCS slot clash checker" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
+    <meta name="author" content="FFCS Planner" />
+    <link rel="canonical" href="https://ffcs-planner-timetable.vercel.app/" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/og-image.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="FFCS Planner" />
+    <meta property="og:title" content="FFCS Planner – Free FFCS Timetable Generator for VIT Vellore" />
+    <meta property="og:description" content="Plan your FFCS semester: slot clash checks, credit tracking, auto-generated clash-free timetables and live collaboration." />
+    <meta property="og:url" content="https://ffcs-planner-timetable.vercel.app/" />
+    <meta property="og:image" content="https://ffcs-planner-timetable.vercel.app/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:locale" content="en_IN" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="FFCS Planner – Free FFCS Timetable Generator for VIT Vellore" />
+    <meta name="twitter:description" content="Slot clash checks, credit tracking and auto-generated clash-free FFCS timetables." />
+    <meta name="twitter:image" content="https://ffcs-planner-timetable.vercel.app/og-image.png" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" />
+
+    <script type="application/ld+json">{"@context": "https://schema.org", "@type": "WebApplication", "name": "FFCS Planner", "alternateName": ["FFCS Timetable Planner", "FFCS Timetable Generator", "VIT FFCS Planner"], "url": "https://ffcs-planner-timetable.vercel.app/", "description": "Free FFCS timetable planner and generator for VIT Vellore students with slot clash checks, credit tracking, recommended timetables and live collaboration.", "applicationCategory": "EducationalApplication", "operatingSystem": "Any (web browser)", "browserRequirements": "Requires JavaScript", "inLanguage": "en-IN", "audience": {"@type": "EducationalAudience", "educationalRole": "student"}, "offers": {"@type": "Offer", "price": "0", "priceCurrency": "INR"}, "featureList": ["Slot clash detection", "Credit tracking", "Recommended clash-free timetable generator", "Theory and lab pairing", "Live collaboration rooms", "Google sign-in cloud sync"]}</script>
+    <script type="application/ld+json">{"@context": "https://schema.org", "@type": "WebSite", "name": "FFCS Planner", "url": "https://ffcs-planner-timetable.vercel.app/"}</script>
+    <script type="application/ld+json">{"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": [{"@type": "Question", "name": "What is an FFCS timetable planner?", "acceptedAnswer": {"@type": "Answer", "text": "An FFCS timetable planner helps VIT students plan their Fully Flexible Credit System semester: you pick subjects, faculty and slots, and the planner checks for slot clashes and totals your credits before you register on VTOP."}}, {"@type": "Question", "name": "How do I make an FFCS timetable for VIT Vellore?", "acceptedAnswer": {"@type": "Answer", "text": "Create a timetable, add each course with its slot, faculty and credits, and the weekly grid shows theory and lab slots Monday to Friday with official timings. Clashing slots are flagged immediately."}}, {"@type": "Question", "name": "Does it generate a timetable automatically?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The Recommended Timetables feature lets you choose subjects, rank up to five faculty per subject, and then searches for the best clash-free combinations. You can save any result as an editable timetable."}}, {"@type": "Question", "name": "Can I pair theory and lab slots together?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The Add Together option pairs theory and lab offerings for the same subject and faculty using the slot rules, and tells you when a counterpart is missing or clashes."}}, {"@type": "Question", "name": "Can I plan a timetable with friends?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Create a collaboration room and share the link and code, and everyone sees timetable changes live."}}, {"@type": "Question", "name": "Is the FFCS planner free?", "acceptedAnswer": {"@type": "Answer", "text": "Yes, it is free. You can continue in your browser without an account or sign in with Google to back up and sync your timetables across devices."}}]}</script>
+    <style>html,body{margin:0;background:#0b1020;color:#e7ecf8;font-family:'DM Sans',system-ui,sans-serif}#seo-shell{max-width:760px;margin:0 auto;padding:48px 20px;line-height:1.6}#seo-shell h1{font-size:clamp(28px,5vw,44px);line-height:1.15}#seo-shell h2{margin-top:32px}#seo-shell h3{margin:18px 0 4px;font-size:16px}#seo-shell p,#seo-shell li{color:#aab6d0}</style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- Crawlable fallback: React replaces this on load. Mirrors the real app's features. -->
+      <main id="seo-shell">
+        <h1>FFCS Planner: free FFCS timetable generator for VIT Vellore</h1>
+        <p>Plan your FFCS semester in one place. Add courses with their slots, faculty and credits, catch slot clashes instantly, and generate clash-free timetables for VIT Vellore.</p>
+        <h2>What you can do</h2>
+        <ul>
+          <li>Build a Monday–Friday theory and lab timetable with official slot timings</li>
+          <li>Detect slot clashes as you add courses</li>
+          <li>Auto-generate recommended clash-free timetables from your preferred faculty</li>
+          <li>Pair theory and lab slots for the same subject and faculty</li>
+          <li>Track total credits and keep multiple timetables</li>
+          <li>Plan together with friends in live collaboration rooms</li>
+        </ul>
+        <h2>Frequently asked questions</h2>
+        <h3>What is an FFCS timetable planner?</h3><p>An FFCS timetable planner helps VIT students plan their Fully Flexible Credit System semester: you pick subjects, faculty and slots, and the planner checks for slot clashes and totals your credits before you register on VTOP.</p><h3>How do I make an FFCS timetable for VIT Vellore?</h3><p>Create a timetable, add each course with its slot, faculty and credits, and the weekly grid shows theory and lab slots Monday to Friday with official timings. Clashing slots are flagged immediately.</p><h3>Does it generate a timetable automatically?</h3><p>Yes. The Recommended Timetables feature lets you choose subjects, rank up to five faculty per subject, and then searches for the best clash-free combinations. You can save any result as an editable timetable.</p><h3>Can I pair theory and lab slots together?</h3><p>Yes. The Add Together option pairs theory and lab offerings for the same subject and faculty using the slot rules, and tells you when a counterpart is missing or clashes.</p><h3>Can I plan a timetable with friends?</h3><p>Yes. Create a collaboration room and share the link and code, and everyone sees timetable changes live.</p><h3>Is the FFCS planner free?</h3><p>Yes, it is free. You can continue in your browser without an account or sign in with Google to back up and sync your timetables across devices.</p>
+        <noscript><p>FFCS Planner needs JavaScript enabled to run.</p></noscript>
+      </main>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

@@ -744,6 +744,15 @@ function App() {
     {...collaborationProps} />;
 }
 
+const FFCS_FAQ = [
+  ["What is an FFCS timetable planner?", "An FFCS timetable planner helps VIT students plan their Fully Flexible Credit System semester: you pick subjects, faculty and slots, and the planner checks for slot clashes and totals your credits before you register on VTOP."],
+  ["How do I make an FFCS timetable for VIT Vellore?", "Create a timetable, add each course with its slot, faculty and credits, and the weekly grid shows theory and lab slots Monday to Friday with official timings. Clashing slots are flagged immediately."],
+  ["Does it generate a timetable automatically?", "Yes. The Recommended Timetables feature lets you choose subjects, rank up to five faculty per subject, and then searches for the best clash-free combinations. You can save any result as an editable timetable."],
+  ["Can I pair theory and lab slots together?", "Yes. The Add Together option pairs theory and lab offerings for the same subject and faculty using the slot rules, and tells you when a counterpart is missing or clashes."],
+  ["Can I plan a timetable with friends?", "Yes. Create a collaboration room and share the link and code, and everyone sees timetable changes live."],
+  ["Is the FFCS planner free?", "Yes, it is free. You can continue in your browser without an account or sign in with Google to back up and sync your timetables across devices."],
+];
+
 function Login({ onLogin, onGoogleLogin, authError, authBusy, cloudConfigured }) {
   const [n, setN] = useState("");
   const [r, setR] = useState("");
@@ -755,6 +764,7 @@ function Login({ onLogin, onGoogleLogin, authError, authBusy, cloudConfigured })
   };
 
   return (
+    <>
     <div className="auth-page">
       <div className="auth-glow glow-one" /><div className="auth-glow glow-two" />
       <div className="auth-layout">
@@ -798,6 +808,12 @@ function Login({ onLogin, onGoogleLogin, authError, authBusy, cloudConfigured })
         </section>
       </div>
     </div>
+    <section className="seo-info" aria-labelledby="seo-info-title">
+      <h2 id="seo-info-title">Free FFCS timetable planner and generator for VIT Vellore</h2>
+      <p>FFCS Planner helps VIT students build a clash-free timetable before VTOP registration. Add courses with their slots, faculty and credits, see theory and lab slots on a Monday–Friday grid, and let the recommended timetable generator search for the best combinations.</p>
+      {FFCS_FAQ.map(([q, a]) => <div key={q}><h3>{q}</h3><p>{a}</p></div>)}
+    </section>
+    </>
   );
 }
 
